@@ -118,7 +118,7 @@ namespace MqttWire {
     // `maxBody` is skipped (oversize() is set) rather than buffered.
     class Parser {
     public:
-        explicit Parser(size_t maxBody = 1024) : _max(maxBody) {}
+        explicit Parser(size_t maxBody = 1024) : _maxBody(maxBody) {}
 
         void reset() {
             _state = Header;
@@ -149,7 +149,7 @@ namespace MqttWire {
                     if (b & 0x80) {
                         return false;
                     }
-                    _oversize = _len > _max;
+                    _oversize = _len > _maxBody;
                     if (_len == 0) {
                         _state = Header;
                         return true;
@@ -196,7 +196,7 @@ namespace MqttWire {
 
     private:
         enum State { Header, Length, Body } _state = Header;
-        size_t      _max;
+        size_t      _maxBody;
         uint8_t     _header   = 0;
         size_t      _len      = 0;
         size_t      _mult     = 1;
