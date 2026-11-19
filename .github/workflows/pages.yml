@@ -41,14 +41,16 @@ jobs:
         with:
           path: ~/.platformio
           key: platformio-pages-${{ runner.os }}
+      # --disable-auto-clean as in build-dw-release.py: without it the buildfs
+      # run can clean the env's build dir and drop bootloader.bin.
       - name: Build ESP32 (MKS DLC32)
         run: |
-          pio run -e sandtable
-          pio run -e sandtable -t buildfs
+          pio run --disable-auto-clean -e sandtable
+          pio run --disable-auto-clean -e sandtable -t buildfs
       - name: Build ESP32-S3 (MKS DLC32 MAX)
         run: |
-          pio run -e sandtable_s3
-          pio run -e sandtable_s3 -t buildfs
+          pio run --disable-auto-clean -e sandtable_s3
+          pio run --disable-auto-clean -e sandtable_s3 -t buildfs
       - name: Assemble site
         run: python3 flasher/make_site.py _site
       - uses: actions/upload-pages-artifact@v3
