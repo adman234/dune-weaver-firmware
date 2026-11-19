@@ -85,6 +85,7 @@
 #include "Channel.h"
 #include "Pin.h"
 #include "LedHook.h"
+#include "LedLooks.h"
 #include "LedWhite.h"
 
 #include <string>
@@ -276,6 +277,9 @@ private:
     EnumSetting*   _white       = nullptr;  // RGBW strips: auto-white mode (LedWhite::Mode)
     EnumSetting*   _run_effect  = nullptr;
     EnumSetting*   _idle_effect = nullptr;
+    StringSetting* _run_looks   = nullptr;  // rotating looks while running (LedLooks.h)
+    StringSetting* _idle_looks  = nullptr;  // rotating looks while idle
+    IntSetting*    _look_min    = nullptr;  // also rotate every N minutes (0 = only per state entry)
     EnumSetting*   _direction   = nullptr;  // 'ball' effect: ring winding vs theta (cw/ccw)
     IntSetting*    _align       = nullptr;  // 'ball' effect: angular offset, degrees 0..359
     IntSetting*    _ballsize    = nullptr;  // 'ball' effect: glow radius in LEDs (size of the follow blob)
@@ -291,6 +295,15 @@ private:
     // while Idle/Hold) and whose choice currently wins -- see LedHook.h.
     LedHook _hook;
     int     _last_setting_effect = -1;  // $LED/Effect as of the last frame
+
+    // Rotating looks ($LED/RunLooks, $LED/IdleLooks), re-parsed only when the
+    // setting text changes.  _look is the one in force this frame (effect -1 = none).
+    std::string          _looks_src[2];
+    std::vector<LedLook> _looks[2];
+    LookRotation         _rotation;
+    LedLook              _look;
+    bool                 _look_on = false;  // the look is what renders (no live/manual/quiet override)
+    void                 pickLook();
 
     // Live overrides ($Sand/Led / /sand_led).  Empty string = unset, so the
     // persisted setting is used.  Set while moving, flushed to NVS at idle.
