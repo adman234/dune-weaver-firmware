@@ -89,6 +89,9 @@ namespace Kinematics {
         // pick the coordinate/feed semantics: theta/rho + .thr translation
         // here, plain cartesian mm (G-code patterns) on CoreXY/Cartesian.
         static bool active() { return _instance != nullptr; }
+        // Y-motor mm per unit of rho (the rho_mm config item), for code that
+        // has to talk about rho travel in motor terms.  20 when not active.
+        static float rhoMm() { return _instance ? _instance->_rho_mm : 20.0f; }
 
         ~ThetaRho() {}
 
