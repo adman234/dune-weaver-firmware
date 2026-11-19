@@ -88,6 +88,7 @@
 #include "LedWhite.h"
 
 #include <string>
+#include <vector>
 #include <cstdlib>
 
 class IntSetting;
@@ -114,6 +115,9 @@ public:
     // applied in memory only (no flash write) and flushed to NVS on the
     // return to idle.  Reached from $Sand/Led and /sand_led.
     static Leds* instance() { return _instance; }
+    // Every selectable effect name in id order (no "none"), for MQTT's
+    // effect select.
+    static void effectNames(std::vector<std::string>& out);
     Error        setLive(const std::string& key, const std::string& value);
 
     // What the strip is ACTUALLY showing, and why that differs from

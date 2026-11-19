@@ -302,8 +302,11 @@ const char* SandApi::macAddress() {
 // Shared status builder.  Defined outside the anonymous namespace so the web
 // server's /sand_status route can reuse it; it still sees the file-local
 // settingValue() helper above (internal linkage, visible for the rest of the TU).
-std::string SandApi::statusJson() {
-    SandStatus::Data d;
+const char* SandApi::setting(const char* name) {
+    return settingValue(name);
+}
+
+void SandApi::collectStatus(SandStatus::Data& d) {
     d.state = state_name();
 
     // Which coordinate model the client should render: theta/rho for the round
@@ -429,6 +432,12 @@ std::string SandApi::statusJson() {
     // dedupe this table across discovery paths and DHCP changes.
     d.mac      = SandApi::macAddress();
     d.hostname = WiFi.getHostname();
+
+}
+
+std::string SandApi::statusJson() {
+    SandStatus::Data d;
+    collectStatus(d);
 
     // Splice in the wall-clock block (kept here so SandStatus stays time-free).
     std::string json = SandStatus::encode(d);
@@ -584,6 +593,9 @@ std::string SandApi::settingsJson() {
         "Playlist/AutostartMode", "Playlist/AutostartShuffle", "Playlist/AutostartPause",
         "Playlist/AutostartPauseFromStart", "Playlist/AutostartClear",
         "Sands/Enabled",   "Sands/Slots",   "Sands/LedOff",   "Sands/FinishPattern",
+        // MQTT/Password is write-only and deliberately not listed.
+        "MQTT/Enable",     "MQTT/Broker",   "MQTT/Port",      "MQTT/User",
+        "MQTT/DeviceId",   "MQTT/DeviceName", "MQTT/Discovery", "MQTT/Prefix",
     };
     std::vector<std::pair<std::string, std::string>> kv;
     for (const char* k : keys) {

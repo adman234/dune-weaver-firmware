@@ -15,6 +15,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <cmath>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <new>  // std::nothrow (resize)
@@ -159,6 +160,20 @@ namespace {
 }
 
 Leds* Leds::_instance = nullptr;
+
+void Leds::effectNames(std::vector<std::string>& out) {
+    std::vector<std::pair<int, std::string>> byId;
+    for (auto const& e : ledEffects) {
+        if (e.second != EFFECT_NONE) {
+            byId.emplace_back(e.second, e.first);
+        }
+    }
+    std::sort(byId.begin(), byId.end());
+    out.clear();
+    for (auto& e : byId) {
+        out.push_back(e.second);
+    }
+}
 
 void Leds::afterParse() {
     // Boot only.  Once running, the wire order belongs to $LED/Order, which

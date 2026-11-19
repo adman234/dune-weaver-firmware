@@ -616,6 +616,44 @@ The firmware may pause discovery on its own under memory pressure — look for
 
 ---
 
+## MQTT / Home Assistant (off by default)
+
+A light MQTT client with Home Assistant discovery. It uses the same topics and
+unique ids as the Raspberry Pi Dune Weaver, so a table moved off the Pi keeps its
+HA entities. Settings are NVS and are writable while paused.
+
+```
+$MQTT/Broker=192.168.1.10
+$MQTT/Port=1883
+$MQTT/User=sandtable
+$MQTT/Password=<secret>        # write-only: reads back as ********
+$MQTT/Enable=ON
+```
+
+| Setting | Default | Notes |
+|---|---|---|
+| `$MQTT/Enable` | `OFF` | `ON` connects once WiFi is up; changes apply within ~3 s, no reboot needed |
+| `$MQTT/Broker` | empty | host or IP |
+| `$MQTT/Port` | `1883` | plain TCP (no TLS) |
+| `$MQTT/User`, `$MQTT/Password` | empty | the password never appears in `$S`, `/sand_settings` or logs |
+| `$MQTT/DeviceId` | `dune_weaver` | topic root and unique-id prefix; keep the Pi's value to keep its entities |
+| `$MQTT/DeviceName` | `Dune Weaver` | device name shown in HA |
+| `$MQTT/Discovery` | `ON` | publish HA discovery under `$MQTT/Prefix` |
+| `$MQTT/Prefix` | `homeassistant` | HA discovery prefix |
+
+Topics (`<id>` = `$MQTT/DeviceId`): `<id>/availability` (`online`/`offline`, LWT),
+`<id>/command/{stop,pause,play,skip}`, `<id>/speed/set`, `<id>/pattern/set`,
+`<id>/playlist/set`, `<id>/playlist/{mode,pause_time,clear_pattern,shuffle}/set`,
+`<id>/led/{power,brightness,effect,speed,intensity,color}/set`; each has a
+`…/state` twin, plus `<id>/state/{running,completion,time_remaining,serial}`.
+Commands are an allow-list; MQTT cannot send arbitrary `$` lines. Pattern names are
+relative to `/patterns` (`star.thr`). On connect the Pi's retired select/screen
+entities are cleared. Playlist settings follow the normal idle/paused gate.
+
+The client skips publishing while the largest free heap block is under 16 KB.
+
+---
+
 ## Live status stream (single client, WebSocket on port 82)
 
 ```
