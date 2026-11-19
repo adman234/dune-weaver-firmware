@@ -86,7 +86,10 @@ TEST(MqttTopics, ParseLedColor) {
 TEST(MqttTopics, PatternNames) {
     EXPECT_EQ(patternDisplay("/sd/patterns/star.thr"), "star.thr");
     EXPECT_EQ(patternDisplay("/patterns/custom/a.thr"), "custom/a.thr");
-    EXPECT_EQ(patternPath("/sd/patterns/x.thr"), "/sd/patterns/x.thr");
+    // $Sand/Run takes SD-relative paths, so the /sd mount prefix is dropped.
+    EXPECT_EQ(patternPath("/sd/patterns/x.thr"), "/patterns/x.thr");
+    EXPECT_EQ(patternPath("star.thr"), "/patterns/star.thr");
+    EXPECT_EQ(patternPath("patterns/a/b.thr"), "/patterns/a/b.thr");
 }
 
 TEST(MqttTopics, DiscoveryDocuments) {
