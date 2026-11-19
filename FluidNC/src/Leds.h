@@ -284,6 +284,7 @@ private:
     StringSetting* _run_looks   = nullptr;  // rotating looks while running (LedLooks.h)
     StringSetting* _idle_looks  = nullptr;  // rotating looks while idle
     IntSetting*    _look_min    = nullptr;  // also rotate every N minutes (0 = only per state entry)
+    EnumSetting*   _look_shuf   = nullptr;  // ON = random next look (no back-to-back repeat)
     EnumSetting*   _direction   = nullptr;  // 'ball' effect: ring winding vs theta (cw/ccw)
     IntSetting*    _align       = nullptr;  // 'ball' effect: angular offset, degrees 0..359
     IntSetting*    _ballsize    = nullptr;  // 'ball' effect: glow radius in LEDs (size of the follow blob)

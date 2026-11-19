@@ -18,7 +18,8 @@
   still applies (an explicit effect change suspends it until the next state
   change).  The rotation moves to the next look each time the category is
   entered -- so once per pattern in a playlist -- and, with $LED/LookMinutes > 0,
-  also every that many minutes while it stays there.
+  also every that many minutes while it stays there.  $LED/LookShuffle=ON picks
+  a random look instead of the next one, never the same look twice in a row.
 
   Std-only on purpose so the parser and the rotation are unit-testable in
   [env:tests]; Leds owns one LookRotation and resolves the names.
@@ -139,7 +140,9 @@ class LookRotation {
 public:
     // cat: 0 = run, 1 = idle, anything else = no category (answers -1).
     // n: the category's list length.  interval_ms: 0 = only on entering.
-    int pick(int cat, size_t n, uint32_t now_ms, uint32_t interval_ms) {
+    // shuffle: on a change pick a random look (rnd is the caller's random
+    // number, used only then) other than the current one, instead of the next.
+    int pick(int cat, size_t n, uint32_t now_ms, uint32_t interval_ms, bool shuffle = false, uint32_t rnd = 0) {
         if (cat != 0 && cat != 1) {
             _cat = -1;
             return -1;
@@ -148,14 +151,27 @@ public:
             _cat = cat;  // entering an empty list still counts as entering
             return -1;
         }
-        int& idx = _idx[cat];
+        int& idx     = _idx[cat];
+        bool advance = false;
         if (cat != _cat) {
             _cat   = cat;
             _since = now_ms;
-            idx    = idx < 0 ? 0 : idx + 1;
+            if (idx < 0) {
+                idx = shuffle ? static_cast<int>(rnd % n) : 0;
+            } else {
+                advance = true;
+            }
         } else if (interval_ms && now_ms - _since >= interval_ms) {
-            _since = now_ms;
-            idx++;
+            _since  = now_ms;
+            advance = true;
+        }
+        if (advance) {
+            if (shuffle && n > 1) {
+                // Step 1..n-1 places from the current look: random, never a repeat.
+                idx = static_cast<int>((static_cast<size_t>(idx) % n + 1 + rnd % (n - 1)) % n);
+            } else {
+                idx++;
+            }
         }
         if (idx < 0 || static_cast<size_t>(idx) >= n) {
             idx = idx < 0 ? 0 : static_cast<int>(idx % n);  // wrap, or the list shrank
