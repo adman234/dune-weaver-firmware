@@ -70,6 +70,7 @@
 
 #include <string>
 #include <vector>
+#include <mutex>
 #include <cstdint>  // SIZE_MAX
 
 class IntSetting;
@@ -275,6 +276,10 @@ private:
     // Cross-task requests.  Handlers may run in another task, so the
     // name goes through a fixed buffer (a std::string assignment racing
     // a reader can corrupt the heap), written before the flag is set.
+    // _req_lock covers staging a run (name + options + _req_run) and
+    // cancelling one (_req_run/_req_stop), so the poller never reads a
+    // half-written request.  _req_skip is a lone flag and needs no lock.
+    std::mutex    _req_lock;
     volatile bool _req_stop = false;
     volatile bool _req_skip = false;
     volatile bool _req_run  = false;
