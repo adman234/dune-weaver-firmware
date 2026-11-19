@@ -7,6 +7,7 @@
 #include <cstddef>
 
 #include "Error.h"
+#include "SandStatus.h"
 
 class Channel;
 
@@ -21,6 +22,16 @@ namespace SandApi {
     // clients can poll status without contending for the single-client
     // webui-v3 WebSocket).
     std::string statusJson();
+
+    // The same snapshot as a struct, for in-firmware consumers (the MQTT
+    // bridge) that would otherwise parse statusJson() back.  Poller task only:
+    // the job-source pointer it reads is only stable there.
+    // `live_effect` backs d.led_effect (a copy of the LED override, taken under
+    // its lock), so it must outlive d.
+    void collectStatus(SandStatus::Data& d, std::string& live_effect);
+
+    // Current value of a named setting (as $Key would print it), or nullptr.
+    const char* setting(const char* name);
 
     // Lowercase STA MAC "aa:bb:cc:dd:ee:ff" — the table's stable hardware
     // identity, so clients can dedupe a table across discovery paths (mDNS vs
