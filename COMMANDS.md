@@ -126,7 +126,14 @@ curl "$B/command?plain=\$Sand/ThetaOffset"         # read current offset
 - **Crash** mode: drives the rho (Y) carriage blindly into its physical center stop
   (no switch, no stall detection — plain stepsticks), then declares that position
   theta=0, rho=0. Theta is **not** moved, just zeroed in place. Jog feed is a fixed
-  gentle seek rate; overshoot is full rho travel + margin.
+  gentle 200 Y-motor mm/min. The first home after boot drives the full rho travel
+  (Y `max_travel_mm`, in rho units, × `rho_mm`); a re-home while Y is still homed
+  drives only the current rho + 0.15. The log line `Crash home: rho …` gives the
+  motor distance and the worst-case time.
+- **Bigger table / longer arm**: scale `kinematics: ThetaRho: rho_mm` (Y-motor mm
+  from centre to edge) until `rho=1` reaches the real edge. Leave Y `max_travel_mm`
+  at ~1.1: it is in rho units, so it already scales with `rho_mm`. The first crash
+  home simply takes longer (rho_mm 180 → ~200 mm → ~60 s at 200 mm/min).
 - **Theta offset** (`$Sand/ThetaOffset`, degrees): applied at home time by **both**
   modes — pattern theta=0 is placed that many degrees from the home reference (the
   limit switch in sensor mode, the crash position in crash mode). Idle-gated;
@@ -379,7 +386,7 @@ curl -s "$B/sand_settings" | grep -i 'LED/IdleEffect\|LED/RunEffect\|Sands/'
 ## Playlists
 
 ```bash
-curl "$B/command?plain=\$Playlist/Run=evening"   # /playlists/evening.txt
+curl "$B/command?plain=\$Playlist/Run=evening"   # /playlists/evening.txt (".txt" is added unless the name already ends in it)
 curl "$B/command?plain=\$Playlist/Skip"          # skip whole item -> next item, NO pause (skipping a clear skips its pattern too)
 curl "$B/command?plain=\$Playlist/Stop"          # stop after current pattern
 curl "$B/command?plain=\$Playlist/List"          # folder listing + active position

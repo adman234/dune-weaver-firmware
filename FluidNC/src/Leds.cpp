@@ -384,6 +384,9 @@ void Leds::secondaryColor(uint8_t& r, uint8_t& g, uint8_t& b) {
 // it on the return to idle.
 Error Leds::setLive(const std::string& key, const std::string& value) {
     bool idle = state_is(State::Idle) || state_is(State::Alarm);
+    // $Sand/Led can arrive from serial or telnet, which run in the main
+    // protocol task, while render() reads the _live_* strings in the poller.
+    std::lock_guard<std::recursive_mutex> lock(_live_lock);
 
     if (key == "effect") {
         if (enumId(ledEffects, value, -1) < 0) {
@@ -502,6 +505,7 @@ Error Leds::setLive(const std::string& key, const std::string& value) {
 // Persist any in-memory live overrides to NVS, then clear them so the
 // $LED/* settings regain authority.  Called once on the Run->Idle edge.
 void Leds::flushLive() {
+    std::lock_guard<std::recursive_mutex> lock(_live_lock);
     if (!_live_effect.empty()) {
         _effect->setStringValue(_live_effect);
         _live_effect.clear();
@@ -1374,6 +1378,7 @@ int Leds::hookEffect() {
 // Still Sands quiet-off wins over everything; then the live override beats the
 // state hook, which beats the persisted setting.
 int Leds::effectiveEffect() {
+    std::lock_guard<std::recursive_mutex> lock(_live_lock);
     if (_quiet_off) {
         return EFFECT_OFF;
     }
@@ -1389,6 +1394,7 @@ const char* Leds::activeEffect() {
 }
 
 const char* Leds::overrideSource() {
+    std::lock_guard<std::recursive_mutex> lock(_live_lock);
     if (_quiet_off) {
         return "quiet";
     }
@@ -1423,15 +1429,20 @@ void Leds::render() {
         _hook.manualChoice();
     }
 
-    int effect   = effectiveEffect();
-    _cur_palette = _live_palette.empty() ? (_palette ? _palette->get() : 0) : enumId(ledPalettes, _live_palette, 0);
+    uint8_t brightness;
+    {
+        // Everything that reads a _live_* override, renderEffect() included.
+        std::lock_guard<std::recursive_mutex> lock(_live_lock);
+        int effect   = effectiveEffect();
+        _cur_palette = _live_palette.empty() ? (_palette ? _palette->get() : 0) : enumId(ledPalettes, _live_palette, 0);
 
-    uint8_t brightness = _live_bright.empty() ? static_cast<uint8_t>(_brightness->get()) : static_cast<uint8_t>(atoi(_live_bright.c_str()));
-    uint8_t speed      = _live_speed.empty() ? static_cast<uint8_t>(_speed->get()) : static_cast<uint8_t>(atoi(_live_speed.c_str()));
-    _cur_ix            = _live_intensity.empty() ? static_cast<uint8_t>(_intensity->get()) : static_cast<uint8_t>(atoi(_live_intensity.c_str()));
-    _phase += speed * 8;  // the live override too, so the app's speed slider works mid-pattern
+        brightness    = _live_bright.empty() ? static_cast<uint8_t>(_brightness->get()) : static_cast<uint8_t>(atoi(_live_bright.c_str()));
+        uint8_t speed = _live_speed.empty() ? static_cast<uint8_t>(_speed->get()) : static_cast<uint8_t>(atoi(_live_speed.c_str()));
+        _cur_ix       = _live_intensity.empty() ? static_cast<uint8_t>(_intensity->get()) : static_cast<uint8_t>(atoi(_live_intensity.c_str()));
+        _phase += speed * 8;  // the live override too, so the app's speed slider works mid-pattern
 
-    renderEffect(effect, speed);
+        renderEffect(effect, speed);
+    }
 
     // An unchanged frame (static, off) is only resent every kRefreshMs: each
     // send is another chance for a late refill to corrupt it, and the periodic
