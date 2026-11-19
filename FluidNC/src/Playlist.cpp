@@ -318,21 +318,27 @@ bool Playlist::quietNow(uint32_t now) {
     }
     _warned_no_time = false;
 
-    std::string err;
-    auto        slots = QuietHours::parse(_sands_slots->get(), &err);
-    if (slots.empty()) {
-        if (!err.empty() && !_warned_bad_slots) {
-            _warned_bad_slots = true;
-            log_warn("playlist: bad $Sands/Slots: " << err);
+    // Parse $Sands/Slots only when it changes.  Re-parsing every check built
+    // a fresh vector (and error string) every 2 s for the life of the board,
+    // churning a heap that is already fragmented.
+    const char* spec = _sands_slots->get();
+    if (!_slots_parsed || _slots_src != spec) {
+        std::string err;
+        _slots        = QuietHours::parse(spec, &err);
+        _slots_src    = spec;
+        _slots_parsed = true;
+        if (_slots.empty() && !err.empty()) {
+            log_warn("playlist: bad $Sands/Slots: " << err);  // once per change
         }
+    }
+    if (_slots.empty()) {
         _quiet_cached = false;
         return false;
     }
-    _warned_bad_slots = false;
 
     struct tm lt;
     localtime_r(&t, &lt);
-    _quiet_cached = QuietHours::match(slots, lt.tm_wday, lt.tm_hour * 60 + lt.tm_min);
+    _quiet_cached = QuietHours::match(_slots, lt.tm_wday, lt.tm_hour * 60 + lt.tm_min);
     return _quiet_cached;
 }
 
