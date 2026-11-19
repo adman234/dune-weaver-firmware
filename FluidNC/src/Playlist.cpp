@@ -426,6 +426,9 @@ bool Playlist::runtimeStatus(RuntimeStatus& out) {
 }
 
 void Playlist::shuffleOrder() {
+    if (_order.size() < 2) {
+        return;  // size()-1 would wrap to SIZE_MAX on an empty order
+    }
     for (size_t i = _order.size() - 1; i > 0; i--) {
         size_t j = esp_random() % (i + 1);
         std::swap(_order[i], _order[j]);
@@ -593,7 +596,15 @@ bool Playlist::advanceIndex() {
     if (_index >= _order.size()) {
         if (!_single && runMode() == MODE_LOOP) {
             if (runShuffle()) {
+                // A fresh shuffle can put the pattern that just finished first
+                // in the new pass, so the table draws it twice in a row.  Move
+                // it to a random later slot instead.
+                uint16_t last = _order.back();
                 shuffleOrder();
+                if (_order.size() > 1 && _order[0] == last) {
+                    size_t j = 1 + esp_random() % (_order.size() - 1);
+                    std::swap(_order[0], _order[j]);
+                }
             }
             _index = 0;
         } else {
