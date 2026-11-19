@@ -32,6 +32,7 @@ extern void sand_http_heap_context(char* out, size_t outlen);
 #include <freertos/semphr.h>
 #include <esp_task_wdt.h>  // task watchdog: a hung poller/protocol task panics (-> coredump + reboot) instead of bricking the table
 #include <mutex>
+#include <cmath>  // fabsf (crash home)
 
 volatile ExecAlarm lastAlarm;  // The most recent alarm code
 
@@ -92,6 +93,9 @@ volatile bool runLimitLoop;  // Interface to show_limits()
 // Feed (mm/min) for the crash-home jog into the rho stop -- slow enough to be
 // gentle on the mechanism, matching a typical homing seek rate.
 static constexpr int CRASH_HOME_FEED_MM_MIN = 200;
+// On a re-home, when the position is still trusted, the crash drives only the
+// current rho plus this margin (rho units) instead of the full travel.
+static constexpr float CRASH_HOME_MARGIN_RHO = 0.15f;
 
 static constexpr float DEG_TO_RAD = 0.0174532925199432957f;
 
@@ -850,6 +854,23 @@ static void protocol_run_crash_home(float theta_offset_rad) {
             dist = mt;
         }
     }
+
+    // The jog is in rho units, and the motor drives dist * rho_mm of Y.  A big
+    // table (rho_mm raised from 20 to ~180) made every home a full 1.1 x 180 =
+    // ~200 mm drive at the gentle crash feed: about a minute of grinding
+    // against the stop, which reads as homing that never finishes (upstream
+    // issue #1).  At boot the position is unknown, so the full travel is the
+    // only safe distance; on a re-home with Y still homed (a reset or alarm
+    // clears that), drive just the current rho plus a margin.
+    if (Machine::Homing::axis_is_homed(Y_AXIS)) {
+        float need = fabsf(get_mpos()[Y_AXIS]) + CRASH_HOME_MARGIN_RHO;
+        if (need < dist) {
+            dist = need;
+        }
+    }
+    float motor_mm = dist * Kinematics::ThetaRho::rhoMm();
+    log_info("Crash home: rho " << dist << " (" << motor_mm << " Y-motor mm at " << CRASH_HOME_FEED_MM_MIN << " mm/min, up to ~"
+                                << static_cast<int>(motor_mm * 60.0f / CRASH_HOME_FEED_MM_MIN + 0.5f) << " s)");
 
     // Y homes negative -> drive toward the rho=0 (centre) stop.
     char jog[LINE_BUFFER_SIZE];
