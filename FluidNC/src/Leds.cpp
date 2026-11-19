@@ -11,6 +11,7 @@
 
 #include <driver/rmt.h>
 #include <esp_intr_alloc.h>  // ESP_INTR_FLAG_IRAM
+#include <esp_system.h>      // esp_random (look shuffle)
 #include <soc/soc_caps.h>  // SOC_RMT_TX_CANDIDATES_PER_GROUP
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -58,6 +59,10 @@ namespace {
         { "heartbeat", 28 }, { "strobe", 29 },     { "police", 30 },      { "chase", 31 },
         { "railway", 32 },   { "pacifica", 33 },   { "aurora", 34 },      { "pride", 35 },
         { "colorwaves", 36 },{ "bpm", 37 },        { "ball", 38 },
+    };
+    enum_opt_t ledOnOff = {
+        { "OFF", 0 },
+        { "ON", 1 },
     };
     enum_opt_t ledDirections = {
         { "cw", 0 }, { "ccw", 1 },
@@ -249,6 +254,7 @@ void Leds::init() {
         _run_looks   = holdOk(new StringSetting("LED looks while running", EXTENDED, WG, NULL, "LED/RunLooks", "", 0, 240));
         _idle_looks  = holdOk(new StringSetting("LED looks while idle", EXTENDED, WG, NULL, "LED/IdleLooks", "", 0, 240));
         _look_min    = holdOk(new IntSetting("LED look rotation, minutes", EXTENDED, WG, NULL, "LED/LookMinutes", 0, 0, 1440));
+        _look_shuf   = holdOk(new EnumSetting("LED look shuffle", EXTENDED, WG, NULL, "LED/LookShuffle", 0, &ledOnOff));
         _direction   = holdOk(new EnumSetting("LED ball direction", EXTENDED, WG, NULL, "LED/Direction", DIR_CW, &ledDirections));
         _align       = holdOk(new IntSetting("LED ball alignment, degrees", EXTENDED, WG, NULL, "LED/Align", 0, 0, 359));
         _ballsize    = holdOk(new IntSetting("LED ball glow size, LEDs", EXTENDED, WG, NULL, "LED/BallSize", 3, 1, 200));
@@ -1409,7 +1415,8 @@ void Leds::pickLook() {
         }
     }
     uint32_t interval = _look_min ? static_cast<uint32_t>(_look_min->get()) * 60000u : 0;
-    int      i        = _rotation.pick(cat, _looks[cat].size(), now_ms(), interval);
+    bool     shuffle  = _look_shuf && _look_shuf->get();
+    int      i        = _rotation.pick(cat, _looks[cat].size(), now_ms(), interval, shuffle, shuffle ? esp_random() : 0);
     if (i >= 0) {
         _look = _looks[cat][i];
     }

@@ -92,3 +92,40 @@ TEST(LookRotation, NoCategoryOrEmptyListIsNone) {
     EXPECT_EQ(r.pick(0, 0, 0, 0), -1);
     EXPECT_EQ(r.pick(0, 2, 1, 0), 0);  // list set while already running: starts at the first look
 }
+
+TEST(LookRotation, ShuffleNeverRepeatsBackToBack) {
+    LookRotation r;
+    int          prev = r.pick(0, 4, 0, 0, true, 7);
+    EXPECT_EQ(prev, 3);  // first entry: rnd % n
+    uint32_t seen = 0;
+    for (uint32_t k = 0; k < 40; k++) {
+        int i = r.pick((k + 1) % 2, 4, k + 1, 0, true, k * 2654435761u);  // idle, run, idle, ...
+        if ((k + 1) % 2 == 0) {
+            EXPECT_NE(i, prev);
+            EXPECT_GE(i, 0);
+            EXPECT_LT(i, 4);
+            prev = i;
+            seen |= 1u << i;
+        }
+    }
+    EXPECT_EQ(seen, 0xfu);  // every look comes up
+}
+
+TEST(LookRotation, ShuffleSingleLookAndTimer) {
+    LookRotation r;
+    EXPECT_EQ(r.pick(1, 1, 0, 0, true, 5), 0);
+    EXPECT_EQ(r.pick(0, 1, 1, 0, true, 9), 0);
+    EXPECT_EQ(r.pick(1, 1, 2, 0, true, 3), 0);  // one look: nothing else to pick
+    LookRotation t;
+    EXPECT_EQ(t.pick(1, 3, 0, 1000, true, 1), 1);
+    EXPECT_EQ(t.pick(1, 3, 500, 1000, true, 0), 1);     // timer not due: stays
+    EXPECT_EQ(t.pick(1, 3, 1000, 1000, true, 0), 2);    // step 1
+    EXPECT_EQ(t.pick(1, 3, 2000, 1000, true, 1), 1);    // step 2 from 2 wraps to 1
+}
+
+TEST(LookRotation, ShuffleOffKeepsListOrder) {
+    LookRotation r;
+    EXPECT_EQ(r.pick(0, 3, 0, 0, false, 99), 0);
+    EXPECT_EQ(r.pick(1, 3, 1, 0, false, 99), 0);
+    EXPECT_EQ(r.pick(0, 3, 2, 0, false, 99), 1);
+}
