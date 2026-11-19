@@ -303,6 +303,7 @@ const char* SandApi::macAddress() {
 // server's /sand_status route can reuse it; it still sees the file-local
 // settingValue() helper above (internal linkage, visible for the rest of the TU).
 std::string SandApi::statusJson() {
+    std::string      live_effect;  // backs d.led_effect; must outlive d
     SandStatus::Data d;
     d.state = state_name();
 
@@ -385,8 +386,9 @@ std::string SandApi::statusJson() {
         }
         // Reflect any live override active during a run.
         if (Leds* leds = Leds::instance()) {
-            if (const char* le = leds->liveEffect()) {
-                d.led_effect = le;
+            live_effect = leds->liveEffect();
+            if (!live_effect.empty()) {
+                d.led_effect = live_effect.c_str();
             }
             int lb = leds->liveBrightness();
             if (lb >= 0) {
