@@ -88,6 +88,7 @@
 #include "LedWhite.h"
 
 #include <string>
+#include <mutex>
 #include <cstdlib>
 
 class IntSetting;
@@ -130,8 +131,16 @@ public:
     // every effect/override.  Driven by Playlist on the quiet-hours edge.
     void setQuietOff(bool off) { _quiet_off = off; }
     // Effective values for status reporting (live override or persisted).
-    const char*  liveEffect() { return _live_effect.empty() ? nullptr : _live_effect.c_str(); }
-    int          liveBrightness() { return _live_bright.empty() ? -1 : atoi(_live_bright.c_str()); }
+    // Copies, taken under _live_lock: setLive() may rewrite the strings from
+    // another task.  An empty liveEffect() means no override.
+    std::string liveEffect() {
+        std::lock_guard<std::recursive_mutex> lock(_live_lock);
+        return _live_effect;
+    }
+    int liveBrightness() {
+        std::lock_guard<std::recursive_mutex> lock(_live_lock);
+        return _live_bright.empty() ? -1 : atoi(_live_bright.c_str());
+    }
     bool         rgbw() const { return _order.rgbw(); }  // 4-byte strip (color_order has a W)
 
     // Channel interface; receives status reports, produces no input
@@ -286,6 +295,10 @@ private:
     // Live overrides ($Sand/Led / /sand_led).  Empty string = unset, so the
     // persisted setting is used.  Set while moving, flushed to NVS at idle.
     static Leds* _instance;
+    // Guards every _live_* string: setLive() writes them from whichever task
+    // ran the command, render()/flushLive()/status read them in the poller.
+    // Recursive because render() holds it across effectiveEffect().
+    std::recursive_mutex _live_lock;
     std::string  _live_effect, _live_palette, _live_color, _live_color2, _live_bright, _live_speed, _live_intensity;
     bool         _quiet_off = false;  // Still Sands: force strip off (in-memory, highest priority)
     std::string  _live_direction, _live_align, _live_ballsize, _live_ballbg, _live_ballbright, _live_ballbgbright;
