@@ -374,6 +374,21 @@ curl -s "$B/sand_status" | python3 -c 'import json,sys; d=json.load(sys.stdin)["
 curl -s "$B/sand_settings" | grep -i 'LED/IdleEffect\|LED/RunEffect\|Sands/'
 ```
 
+**Rotating looks.** `$LED/RunLooks` / `$LED/IdleLooks` hold a comma-separated list of
+looks, `effect[:palette[:speed[:intensity[:RRGGBB]]]]` (an empty field keeps that `$LED/*`
+setting; up to 240 characters). A non-empty list replaces that state's
+`RunEffect`/`IdleEffect` hook, with the same "explicit change wins" rule. The next look
+is picked each time the table enters the state, so a playlist gets a new look per
+pattern; `$LED/LookMinutes=N` also rotates every N minutes (0 = only on entry). A bad
+item is skipped and logged.
+
+```bash
+curl "$B/command?plain=\$LED/RunLooks=colorwaves:sunset:30:100,fire::110:160:ff6a00,pacifica"
+curl "$B/command?plain=\$LED/IdleLooks=breathe:ocean:60:128,candle::100:150:ff9a3c,aurora"
+curl "$B/command?plain=\$LED/LookMinutes=10"   # idle tables change look every 10 min too
+curl "$B/command?plain=\$LED/IdleLooks="       # clear: back to $LED/IdleEffect
+```
+
 ---
 
 ## Playlists

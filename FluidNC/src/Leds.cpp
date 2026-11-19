@@ -156,6 +156,10 @@ namespace {
         }
         return "off";
     }
+
+    // LedLooks name lookups (-1 = unknown)
+    int lookEffectId(const std::string& name) { return enumId(ledEffects, name, -1); }
+    int lookPaletteId(const std::string& name) { return enumId(ledPalettes, name, -1); }
 }
 
 Leds* Leds::_instance = nullptr;
@@ -240,6 +244,11 @@ void Leds::init() {
         _white       = holdOk(new EnumSetting("LED RGBW auto-white mode", EXTENDED, WG, NULL, "LED/White", LedWhite::Accurate, &ledWhiteModes));
         _run_effect  = holdOk(new EnumSetting("LED effect while running", EXTENDED, WG, NULL, "LED/RunEffect", EFFECT_NONE, &ledHookEffects));
         _idle_effect = holdOk(new EnumSetting("LED effect while idle", EXTENDED, WG, NULL, "LED/IdleEffect", EFFECT_NONE, &ledHookEffects));
+        // Rotating looks (LedLooks.h): when a list is set it replaces that
+        // state's RunEffect/IdleEffect hook.  240 chars fits a $ line (256).
+        _run_looks   = holdOk(new StringSetting("LED looks while running", EXTENDED, WG, NULL, "LED/RunLooks", "", 0, 240));
+        _idle_looks  = holdOk(new StringSetting("LED looks while idle", EXTENDED, WG, NULL, "LED/IdleLooks", "", 0, 240));
+        _look_min    = holdOk(new IntSetting("LED look rotation, minutes", EXTENDED, WG, NULL, "LED/LookMinutes", 0, 0, 1440));
         _direction   = holdOk(new EnumSetting("LED ball direction", EXTENDED, WG, NULL, "LED/Direction", DIR_CW, &ledDirections));
         _align       = holdOk(new IntSetting("LED ball alignment, degrees", EXTENDED, WG, NULL, "LED/Align", 0, 0, 359));
         _ballsize    = holdOk(new IntSetting("LED ball glow size, LEDs", EXTENDED, WG, NULL, "LED/BallSize", 3, 1, 200));
@@ -363,7 +372,9 @@ void Leds::getColor(StringSetting* s, uint8_t& r, uint8_t& g, uint8_t& b) {
 }
 
 void Leds::primaryColor(uint8_t& r, uint8_t& g, uint8_t& b) {
-    if (_live_color.empty()) {
+    if (_live_color.empty() && _look_on && _look.color >= 0) {
+        r = (_look.color >> 16) & 0xff, g = (_look.color >> 8) & 0xff, b = _look.color & 0xff;
+    } else if (_live_color.empty()) {
         getColor(_color, r, g, b);
     } else {
         uint32_t rgb = strtoul(_live_color.c_str(), NULL, 16);
@@ -1368,7 +1379,40 @@ bool Leds::commit(uint8_t brightness) {
 // The state hook in force, or -1 for none.  Suppressed while the user's own
 // effect choice stands for this state category (see LedHook).
 int Leds::hookEffect() {
-    return _hook.effect(_run_effect ? _run_effect->get() : -1, _idle_effect ? _idle_effect->get() : -1);
+    int run  = _run_effect ? _run_effect->get() : -1;
+    int idle = _idle_effect ? _idle_effect->get() : -1;
+    // A rotating look replaces its category's single-effect hook.
+    if (_look.effect >= 0) {
+        (_hook.cat() == LedHook::CatRun ? run : idle) = _look.effect;
+    }
+    return _hook.effect(run, idle);
+}
+
+// Re-parse the current category's look list if its text changed, and pick
+// the look in force.  Settings are read fresh every frame, so clearing a
+// list with an empty value takes effect on the next frame.
+void Leds::pickLook() {
+    _look      = LedLook();
+    int cat    = _hook.cat();
+    if (cat != LedHook::CatRun && cat != LedHook::CatIdle) {
+        _rotation.pick(-1, 0, 0, 0);
+        return;
+    }
+    StringSetting* s    = cat == LedHook::CatRun ? _run_looks : _idle_looks;
+    const char*    spec = s ? s->get() : "";
+    if (_looks_src[cat] != spec) {
+        _looks_src[cat] = spec;
+        int bad         = 0;
+        _looks[cat]     = LedLooks::parse(_looks_src[cat], lookEffectId, lookPaletteId, &bad);
+        if (bad) {
+            log_warn("LED: skipped " << bad << " bad look(s) in " << (cat == LedHook::CatRun ? "$LED/RunLooks" : "$LED/IdleLooks"));
+        }
+    }
+    uint32_t interval = _look_min ? static_cast<uint32_t>(_look_min->get()) * 60000u : 0;
+    int      i        = _rotation.pick(cat, _looks[cat].size(), now_ms(), interval);
+    if (i >= 0) {
+        _look = _looks[cat][i];
+    }
 }
 
 // Still Sands quiet-off wins over everything; then the live override beats the
@@ -1423,12 +1467,19 @@ void Leds::render() {
         _hook.manualChoice();
     }
 
+    pickLook();
     int effect   = effectiveEffect();
-    _cur_palette = _live_palette.empty() ? (_palette ? _palette->get() : 0) : enumId(ledPalettes, _live_palette, 0);
+    // The look's palette/speed/intensity/color apply only while the look itself
+    // is rendering: a live override, a manual choice or quiet hours beat it.
+    _look_on     = _look.effect >= 0 && !_quiet_off && _live_effect.empty() && hookEffect() == _look.effect;
+    int palette  = _look_on && _look.palette >= 0 ? _look.palette : (_palette ? _palette->get() : 0);
+    _cur_palette = _live_palette.empty() ? palette : enumId(ledPalettes, _live_palette, 0);
 
     uint8_t brightness = _live_bright.empty() ? static_cast<uint8_t>(_brightness->get()) : static_cast<uint8_t>(atoi(_live_bright.c_str()));
-    uint8_t speed      = _live_speed.empty() ? static_cast<uint8_t>(_speed->get()) : static_cast<uint8_t>(atoi(_live_speed.c_str()));
-    _cur_ix            = _live_intensity.empty() ? static_cast<uint8_t>(_intensity->get()) : static_cast<uint8_t>(atoi(_live_intensity.c_str()));
+    int     set_speed  = _look_on && _look.speed >= 0 ? _look.speed : _speed->get();
+    int     set_ix     = _look_on && _look.intensity >= 0 ? _look.intensity : _intensity->get();
+    uint8_t speed      = _live_speed.empty() ? static_cast<uint8_t>(set_speed) : static_cast<uint8_t>(atoi(_live_speed.c_str()));
+    _cur_ix            = _live_intensity.empty() ? static_cast<uint8_t>(set_ix) : static_cast<uint8_t>(atoi(_live_intensity.c_str()));
     _phase += speed * 8;  // the live override too, so the app's speed slider works mid-pattern
 
     renderEffect(effect, speed);
