@@ -35,6 +35,30 @@ on this hardware).
 - [`PORTING.md`](PORTING.md) — what was ported from the Dune Weaver host and how
 - Upstream FluidNC config reference: <http://wiki.fluidnc.com>
 
+## Flash from the browser
+
+The [web flasher](flasher/) installs the firmware from Chrome or Edge over USB,
+with no toolchain. It can also:
+
+- upload a table config (Pro, original, Mini Pro, Gold, DLC32 MAX), with rho
+  steps, LED count and hostname you can edit;
+- set WiFi and MQTT credentials over the same USB link (they are sent to the
+  board only, never stored or put in a URL);
+- download a backup of a table's settings and config.yaml, and restore one
+  after flashing (passwords are never in backups).
+
+`.github/workflows/pages.yml` builds both boards on every push to `main` and
+publishes the flasher to GitHub Pages (on a fork: Settings > Pages > Source =
+GitHub Actions). To try it locally, build both boards and run:
+
+```bash
+pio run -e sandtable && pio run -e sandtable -t buildfs
+pio run -e sandtable_s3 && pio run -e sandtable_s3 -t buildfs
+python3 flasher/make_site.py _site && python3 -m http.server -d _site 8000
+```
+
+Web Serial works on `http://localhost`, so open <http://localhost:8000>.
+
 ## Build & flash
 
 Uses [PlatformIO](https://platformio.org/).

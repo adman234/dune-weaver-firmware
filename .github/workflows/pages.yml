@@ -1,0 +1,66 @@
+name: Web flasher
+
+# Builds both boards and publishes the browser flasher (flasher/) with the
+# images to GitHub Pages, so a table can be flashed from Chrome or Edge with no
+# toolchain. The site is assembled by flasher/make_site.py.
+#
+# One-time setup on a fork: Settings > Pages > Source = "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe names the version on the page
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: platformio-pages-${{ runner.os }}
+      - name: Build ESP32 (MKS DLC32)
+        run: |
+          pio run -e sandtable
+          pio run -e sandtable -t buildfs
+      - name: Build ESP32-S3 (MKS DLC32 MAX)
+        run: |
+          pio run -e sandtable_s3
+          pio run -e sandtable_s3 -t buildfs
+      - name: Assemble site
+        run: python3 flasher/make_site.py _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

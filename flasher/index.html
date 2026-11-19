@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dune Weaver Flasher</title>
+<style>
+  :root {
+    --bg: #f6f3ee; --card: #fff; --fg: #2b2620; --muted: #776d62; --line: #e2dbd1;
+    --accent: #b5762e; --accent-fg: #fff; --err: #b3261e; --ok: #2e7d32; --warn: #9a6700;
+    --log-bg: #1f1c18; --log-fg: #e8e2d8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171512; --card: #221f1b; --fg: #ece6dc; --muted: #a39887; --line: #38332c;
+      --accent: #d9954a; --accent-fg: #1b1814; --err: #ef8a80; --ok: #81c784; --warn: #e0b54f;
+      --log-bg: #0f0e0c; --log-fg: #ddd5c8;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  h2 { font-size: 1.05rem; margin: 0 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+            padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-weight: 600; margin: 10px 0 4px; }
+  label.inline { display: flex; gap: 8px; align-items: center; font-weight: 500; }
+  input[type=text], input[type=password], input[type=number], select {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--fg); font: inherit; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+  @media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
+  .hint { color: var(--muted); font-size: 0.88rem; margin: 4px 0 0; }
+  .warn { color: var(--warn); }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 8px; padding: 10px 18px;
+           cursor: pointer; background: var(--accent); color: var(--accent-fg); }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  progress { width: 100%; height: 10px; margin: 12px 0 4px; accent-color: var(--accent); }
+  #status { font-weight: 600; min-height: 1.5em; }
+  #log { background: var(--log-bg); color: var(--log-fg); border-radius: 8px; padding: 10px;
+         font: 12px/1.45 ui-monospace, Consolas, monospace; height: 260px; overflow: auto;
+         white-space: pre-wrap; word-break: break-word; }
+  #log .tx { color: #9ecbff; } #log .err { color: #ff8a80; } #log .ok { color: #a5d6a7; }
+  #log .warn { color: #ffd54f; } #log .msg, #log .esp { color: #b8ae9f; }
+  footer { color: var(--muted); font-size: 0.85rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Dune Weaver Flasher</h1>
+  <p class="sub">Install the Dune Weaver firmware on an MKS DLC32 over USB, and set up WiFi and MQTT in the same step.</p>
+
+  <section id="unsupported" hidden>
+    <h2>This browser can't flash boards</h2>
+    <p>Flashing needs Web Serial. Use Chrome or Edge on a desktop computer.</p>
+  </section>
+
+  <div id="app">
+    <section>
+      <h2>1. Board and install</h2>
+      <label for="board">Board</label>
+      <select id="board"></select>
+      <label for="install">Install type</label>
+      <select id="install">
+        <option value="update">Update firmware (keeps settings, WiFi and config)</option>
+        <option value="fresh">Fresh install (erases the board)</option>
+      </select>
+      <p id="freshNote" class="hint warn" hidden>Fresh install erases everything on the board.
+        Download a backup first (bottom of this page) if the board already runs Dune Weaver.
+        Patterns on the SD card are not touched.</p>
+      <label class="inline"><input type="checkbox" id="skipFlash"> Don't flash; only apply the setup below</label>
+    </section>
+
+    <section>
+      <h2>2. Table</h2>
+      <label for="profile">Table config</label>
+      <select id="profile"></select>
+      <p class="hint">Uploads a config.yaml for your table. A fresh install needs one; an update keeps the current config unless you pick one.</p>
+      <div id="profileFields" hidden>
+        <div class="row">
+          <div><label for="ySteps">Rho steps per mm</label><input type="number" id="ySteps" step="any" min="1"></div>
+          <div><label for="leds">LED count</label><input type="number" id="leds" min="0" max="1000"></div>
+        </div>
+        <p class="hint">Prefilled from the table's config. The original Dune Weaver uses the Pro board with 287 steps and 75 LEDs.</p>
+      </div>
+      <label for="hostname">Table name (hostname)</label>
+      <input type="text" id="hostname" autocomplete="off" spellcheck="false" maxlength="32">
+    </section>
+
+    <section>
+      <h2>3. WiFi and MQTT <span class="hint">(optional)</span></h2>
+      <div class="row">
+        <div><label for="ssid">WiFi network</label><input type="text" id="ssid" autocomplete="off" spellcheck="false"></div>
+        <div><label for="wifipass">WiFi password</label><input type="password" id="wifipass" autocomplete="new-password"></div>
+      </div>
+      <label class="inline" style="margin-top:14px"><input type="checkbox" id="mqtt"> Connect to an MQTT broker (Home Assistant discovery)</label>
+      <div id="mqttFields" hidden>
+        <div class="row">
+          <div><label for="broker">Broker address</label><input type="text" id="broker" autocomplete="off" spellcheck="false" placeholder="192.168.1.10"></div>
+          <div><label for="mqttport">Port</label><input type="number" id="mqttport" value="1883" min="1" max="65535"></div>
+          <div><label for="mqttuser">User</label><input type="text" id="mqttuser" autocomplete="off" spellcheck="false"></div>
+          <div><label for="mqttpass">Password</label><input type="password" id="mqttpass" autocomplete="new-password"></div>
+        </div>
+      </div>
+      <p class="hint">These go to the board over USB only. This page doesn't save or send them anywhere else, and clears the password fields when it finishes.</p>
+    </section>
+
+    <section>
+      <h2>4. Restore a backup <span class="hint">(optional)</span></h2>
+      <input type="file" id="restore" accept=".json,.txt,application/json,text/plain">
+      <p class="hint">A backup from this page, a <code>/sand_settings</code> JSON file, or <code>$Setting=value</code> lines. Settings are restored after the table restarts. Passwords are never in backups, so enter them above.</p>
+      <label id="backupConfigRow" class="inline" hidden><input type="checkbox" id="useBackupConfig" checked> Use the backup's config.yaml instead of the table config above</label>
+    </section>
+
+    <section>
+      <div class="actions">
+        <button id="go">Connect and install</button>
+        <label class="inline" style="margin:0">Speed
+          <select id="baud" style="width:auto">
+            <option value="921600">921600</option>
+            <option value="460800" selected>460800</option>
+            <option value="115200">115200</option>
+          </select>
+        </label>
+      </div>
+      <progress id="progress" value="0" max="1"></progress>
+      <div id="status">Plug the board in over USB, then press Connect.</div>
+      <div id="log" aria-live="polite"></div>
+    </section>
+
+    <section>
+      <h2>Back up a table over USB</h2>
+      <p class="hint">Saves the table's settings and config.yaml to a file. Passwords are left out.</p>
+      <p><button class="secondary" id="backup">Download backup</button></p>
+    </section>
+  </div>
+
+  <footer>Firmware <span id="version">…</span>.
+    <span id="sourceLine" hidden>Source: <a id="source"></a>.</span></footer>
+</main>
+<script type="module" src="flasher.js"></script>
+</body>
+</html>
