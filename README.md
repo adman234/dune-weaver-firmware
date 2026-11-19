@@ -37,8 +37,9 @@ on this hardware).
 
 ## Flash from the browser
 
-The [web flasher](flasher/) installs the firmware from Chrome or Edge over USB,
-with no toolchain. It can also:
+The [web flasher](flasher/) installs the firmware over USB from a desktop browser
+with Web Serial (Chrome, Edge, or Firefox 151 or later), with no toolchain. It can
+also:
 
 - upload a table config (Pro, original, Mini Pro, Gold, DLC32 MAX), with rho
   steps, LED count and hostname you can edit;

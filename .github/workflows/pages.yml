@@ -1,8 +1,8 @@
 name: Web flasher
 
 # Builds both boards and publishes the browser flasher (flasher/) with the
-# images to GitHub Pages, so a table can be flashed from Chrome or Edge with no
-# toolchain. The site is assembled by flasher/make_site.py.
+# images to GitHub Pages, so a table can be flashed from any browser with Web
+# Serial and no toolchain. The site is assembled by flasher/make_site.py.
 #
 # One-time setup on a fork: Settings > Pages > Source = "GitHub Actions".
 
