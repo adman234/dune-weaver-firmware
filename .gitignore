@@ -43,3 +43,4 @@ __pycache__/
 soak/logs/
 # per-table configs + backups (device-specific, never committed)
 dwg_configs/
+_site/
