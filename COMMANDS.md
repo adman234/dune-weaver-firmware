@@ -379,7 +379,7 @@ curl -s "$B/sand_settings" | grep -i 'LED/IdleEffect\|LED/RunEffect\|Sands/'
 ## Playlists
 
 ```bash
-curl "$B/command?plain=\$Playlist/Run=evening"   # /playlists/evening.txt
+curl "$B/command?plain=\$Playlist/Run=evening"   # /playlists/evening.txt (".txt" is added unless the name already ends in it)
 curl "$B/command?plain=\$Playlist/Skip"          # skip whole item -> next item, NO pause (skipping a clear skips its pattern too)
 curl "$B/command?plain=\$Playlist/Stop"          # stop after current pattern
 curl "$B/command?plain=\$Playlist/List"          # folder listing + active position

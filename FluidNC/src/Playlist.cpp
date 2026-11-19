@@ -482,7 +482,10 @@ bool Playlist::loadPlaylist(const std::string& name) {
     if (path.find('/') == std::string::npos) {
         path = _folder + "/" + path;
     }
-    if (path.find('.') == std::string::npos) {
+    // Only a missing ".txt" is implied.  Testing for any '.' failed every
+    // playlist whose name holds one ("Mr. Sandman", "v1.2"), which then
+    // opened "<name>" with no extension and was reported not found.
+    if (!PlaylistParse::has_ext_in(path, ".txt")) {
         path += ".txt";
     }
     if (path[0] != '/') {
