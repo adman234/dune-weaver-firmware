@@ -66,7 +66,8 @@
 #include "Module.h"
 #include "Channel.h"
 #include "FluidPath.h"
-#include "PlaylistParse.h"  // clean_line, CLEAR_*
+#include "PlaylistParse.h"
+#include "QuietHours.h"  // clean_line, CLEAR_*
 
 #include <string>
 #include <vector>
@@ -336,7 +337,10 @@ private:
     bool     _in_quiet         = false;  // currently inside quiet hours
     bool     _quiet_override   = false;  // Skip pressed: run one pattern anyway
     bool     _warned_no_time   = false;
-    bool     _warned_bad_slots = false;
+    // Last parsed $Sands/Slots and the string it came from (see quietNow).
+    std::string                   _slots_src;
+    std::vector<QuietHours::Slot> _slots;
+    bool                          _slots_parsed = false;
 
     // Published snapshot (written by the polling task, read by the API
     // command handler in another task).  POD only - no std::string.
