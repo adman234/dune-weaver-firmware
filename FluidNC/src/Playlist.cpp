@@ -185,12 +185,15 @@ Error Playlist::requestRun(const char* name, Channel& out) {
         log_error_to(out, "Machine is in alarm; home ($H) or unlock ($X) first");
         return Error::IdleError;
     }
-    strlcpy(_req_name, name, sizeof(_req_name));
-    _req_single         = false;
-    _req_clear_override = -1;  // playlist runs use the $Playlist/ClearPattern setting
-    _req_ov_mode = _req_ov_shuffle = _req_ov_pause = _req_ov_pfs = -1;  // manual run: globals
-    _req_no_abort       = false;
-    _req_run            = true;
+    {
+        std::lock_guard<std::mutex> lock(_req_lock);
+        strlcpy(_req_name, name, sizeof(_req_name));
+        _req_single         = false;
+        _req_clear_override = -1;  // playlist runs use the $Playlist/ClearPattern setting
+        _req_ov_mode = _req_ov_shuffle = _req_ov_pause = _req_ov_pfs = -1;  // manual run: globals
+        _req_no_abort       = false;
+        _req_run            = true;
+    }
     log_info_to(out, "Playlist queued: " << name);
     return Error::Ok;
 }
@@ -214,6 +217,7 @@ bool Playlist::stopActive() {
     // Same request the $Playlist/Stop command sets; pollLine() will finish()
     // the sequence to Off (and abort the job) on its next tick, so it never
     // advances clear -> pattern or pattern -> next.
+    std::lock_guard<std::mutex> lock(p->_req_lock);
     p->_req_run  = false;
     p->_req_stop = true;
     return true;
@@ -233,12 +237,15 @@ Error Playlist::requestSingle(const char* patternPath, const char* clearMode, Ch
         log_error_to(out, "Unknown clear mode; use none|adaptive|in|out|sideway|random");
         return Error::InvalidValue;
     }
-    strlcpy(_req_name, patternPath, sizeof(_req_name));
-    _req_single         = true;
-    _req_clear_override = mode;
-    _req_ov_mode = _req_ov_shuffle = _req_ov_pause = _req_ov_pfs = -1;  // single run: globals
-    _req_no_abort       = false;
-    _req_run            = true;
+    {
+        std::lock_guard<std::mutex> lock(_req_lock);
+        strlcpy(_req_name, patternPath, sizeof(_req_name));
+        _req_single         = true;
+        _req_clear_override = mode;
+        _req_ov_mode = _req_ov_shuffle = _req_ov_pause = _req_ov_pfs = -1;  // single run: globals
+        _req_no_abort       = false;
+        _req_run            = true;
+    }
     log_info_to(out, "Pattern queued: " << patternPath << " clear=" << mode);
     return Error::Ok;
 }
@@ -248,6 +255,7 @@ Error Playlist::requestStop(Channel& out) {
         log_info_to(out, "No playlist active");
         return Error::Ok;
     }
+    std::lock_guard<std::mutex> lock(_req_lock);
     _req_run  = false;
     _req_stop = true;
     return Error::Ok;
@@ -800,6 +808,7 @@ Error Playlist::pollLine(char* line) {
             // from the switch position without the recenter.  Wait it out.
         } else {
             _autostart_pending = false;
+            std::lock_guard<std::mutex> lock(_req_lock);
             strlcpy(_req_name, name, sizeof(_req_name));
             _req_single = false;
             // Auto-play uses its own Autostart* settings, independent of the
@@ -851,15 +860,27 @@ Error Playlist::pollLine(char* line) {
         // SAFE deferred path (not a direct Job::abort() in the poller -> UAF).
         // NextItem waits for Idle + !Job::active() before injecting the first
         // command, so the old job is fully torn down before the new one starts.
-        _req_run        = false;
-        _single         = _req_single;          // staged before _req_run was set
-        _clear_override = _req_clear_override;
-        _ov_mode        = _req_ov_mode;         // per-run overrides (auto-play sets these)
-        _ov_shuffle     = _req_ov_shuffle;
-        _ov_pause       = _req_ov_pause;
-        _ov_pfs         = _req_ov_pfs;
-        bool no_abort   = _req_no_abort;
-        _req_no_abort   = false;
+        // Take the whole request under the lock, name included: a second
+        // $Playlist/Run (or $Sand/Run) from another task could otherwise
+        // rewrite _req_name while it is being read below.
+        char name[sizeof(_req_name)];
+        bool no_abort;
+        {
+            std::lock_guard<std::mutex> lock(_req_lock);
+            if (!_req_run) {
+                return Error::NoData;  // a stop cancelled it after the check above
+            }
+            _req_run        = false;
+            _single         = _req_single;
+            _clear_override = _req_clear_override;
+            _ov_mode        = _req_ov_mode;  // per-run overrides (auto-play sets these)
+            _ov_shuffle     = _req_ov_shuffle;
+            _ov_pause       = _req_ov_pause;
+            _ov_pfs         = _req_ov_pfs;
+            no_abort        = _req_no_abort;
+            _req_no_abort   = false;
+            strlcpy(name, _req_name, sizeof(name));
+        }
         _consec_fail    = 0;
         _skip_active    = false;
         // no_abort (boot auto-play only): the only job that can be active at
@@ -881,9 +902,9 @@ Error Playlist::pollLine(char* line) {
             }
         }
         if (_single) {
-            loadSingle(std::string(_req_name));  // synthetic one-item run, never fails
+            loadSingle(std::string(name));  // synthetic one-item run, never fails
             _phase = Phase::NextItem;
-        } else if (loadPlaylist(std::string(_req_name))) {
+        } else if (loadPlaylist(std::string(name))) {
             _phase = Phase::NextItem;
         } else {
             finish("failed to load");
