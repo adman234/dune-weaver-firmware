@@ -119,8 +119,9 @@ TEST(MqttTopics, DiscoveryDocuments) {
 }
 
 TEST(MqttTopics, DiscoveryFitsTheOutBuffer) {
-    // The firmware's esp-mqtt out buffer is 2048 bytes; the effect select is
-    // the biggest document, so try it with every effect name and a long name.
+    // The firmware queues at most 4096 bytes for the socket and only starts a
+    // publish below half of that, so a document must stay well under 2 KB.
+    // The effect select is the biggest: try every effect name and a long name.
     std::vector<std::string> effects;
     for (int i = 0; i < 40; ++i) {
         effects.push_back("effectname" + std::to_string(i));

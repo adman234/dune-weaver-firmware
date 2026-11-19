@@ -5,13 +5,17 @@
 // unique ids as the Raspberry Pi Dune Weaver's MQTT module, so a table moved
 // from the Pi to this firmware keeps its Home Assistant entities.
 //
-// Off by default ($MQTT/Enable=ON turns it on).  Uses the ESP-IDF esp-mqtt
-// client that is already linked into the framework, so it costs no extra
-// library.  Threading: esp-mqtt runs its own task; its event handler only
-// queues incoming commands and raises flags.  Everything that touches the
-// machine (settings, playlists, LEDs, status) runs in poll(), in the poller
-// task like the HTTP handlers.  Publishing uses esp_mqtt_client_enqueue so
-// poll() never blocks on the network.
+// Off by default ($MQTT/Enable=ON turns it on).  Plain TCP, QoS 0, with a
+// retained last will on <id>/availability.  The wire format is the tiny
+// std-only MqttWire.h: the framework's esp-mqtt client cost ~180 KB of flash
+// with its TLS stack.
+//
+// Threading: a small "mqtt" task owns the socket (connect, read, write,
+// keepalive) so a dead broker never stalls the poller, which also renders the
+// LEDs.  It only moves bytes: incoming commands go into a bounded queue, and
+// outgoing packets come from one.  Everything that touches the machine
+// (settings, playlists, LEDs, status) runs in poll(), in the poller task like
+// the HTTP handlers.
 //
 // Commands are an allow-list (MqttTopics::parse): a topic maps to one fixed
 // action or $ line, never an arbitrary $ write.
@@ -25,12 +29,13 @@
 #include "Protocol.h"
 #include "Kinematics/ThetaRho.h"
 #include "MqttTopics.h"
+#include "MqttWire.h"
 
 #include <WiFi.h>
-#include <mqtt_client.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 
 #include <deque>
 #include <map>
@@ -59,14 +64,15 @@ namespace {
         void   sendLine(MsgLevel, const std::string&) override {}
     };
 
-    constexpr size_t   kMaxQueue        = 8;
+    constexpr size_t   kMaxIncoming     = 8;
     constexpr size_t   kMaxPayload      = 512;
-    constexpr size_t   kMaxOutbox       = 4096;    // bytes waiting in esp-mqtt before we hold off
+    constexpr size_t   kMaxOutBytes     = 4096;    // queued for the socket before poll() holds off
     constexpr size_t   kMinLargestBlock = 16384;   // skip publishing below this (mDNS sheds at 24k, web 503s at 10k)
     constexpr uint32_t kStateMs         = 1000;
     constexpr uint32_t kRefreshMs       = 300000;  // republish every state every 5 min
     constexpr uint32_t kStatusMs        = 30000;   // dune_weaver/status heartbeat
     constexpr uint32_t kConfigMs        = 3000;    // re-read settings for a restart
+    constexpr uint16_t kKeepAliveS      = 60;
 
     struct Incoming {
         std::string topic;
@@ -91,24 +97,16 @@ public:
         _lock      = xSemaphoreCreateMutex();
     }
 
-    void deinit() override { stopClient(); }
-
     void poll() override {
         uint32_t now = millis();
-        if (now - _lastConfigCheck >= kConfigMs || _lastConfigCheck == 0) {
-            _lastConfigCheck = now;
+        if (_lastConfigCheck == 0 || now - _lastConfigCheck >= kConfigMs) {
+            _lastConfigCheck = now ? now : 1;
             checkConfig();
         }
-        if (!_client) {
-            if (_wanted && WiFi.isConnected() && now - _lastStartTry >= 10000) {
-                _lastStartTry = now;
-                startClient();
-            }
+        if (!_task) {
             return;
         }
-
         drainCommands();
-
         if (!_connected) {
             return;
         }
@@ -137,7 +135,7 @@ public:
             _lastStatus = now;
             std::string body = "{\"timestamp\":" + std::to_string(now / 1000) + ",\"client_id\":\"" +
                                MqttTopics::jsonEscape(_id) + "\"}";
-            enqueue("dune_weaver/status", body, false);
+            send("dune_weaver/status", body, false);
         }
     }
 
@@ -152,18 +150,26 @@ private:
     EnumSetting*   _discovery = nullptr;
     StringSetting* _prefix    = nullptr;
 
-    esp_mqtt_client_handle_t _client = nullptr;
-    SemaphoreHandle_t        _lock   = nullptr;
-    std::deque<Incoming>     _queue;      // guarded by _lock
-    volatile bool            _connected = false;
-    volatile bool            _resync    = false;
+    // ---- shared with the mqtt task, guarded by _lock --------------------
+    SemaphoreHandle_t          _lock = nullptr;
+    TaskHandle_t               _task = nullptr;
+    uint32_t                   _gen  = 0;  // bumped on every config change
+    bool                       _wanted = false;
+    std::string                _host;
+    int                        _portNum = 1883;
+    MqttWire::ConnectOptions   _opts;
+    std::vector<std::string>   _subs;
+    std::deque<Incoming>       _incoming;
+    std::deque<std::string>    _outgoing;  // encoded packets
+    size_t                     _outBytes = 0;
+    volatile bool              _connected = false;
+    volatile bool              _resync    = false;
 
-    // Copies the client config points at; they must outlive the client.
-    std::string _cfgKey, _host, _userStr, _passStr, _id, _name, _prefixStr, _lwtTopic, _uri;
-    bool        _wanted      = false;
+    // ---- poller task only -------------------------------------------------
+    std::string _cfgKey, _id, _name, _prefixStr;
     bool        _discoveryOn = true;
 
-    uint32_t _lastConfigCheck = 0, _lastStartTry = 0, _lastState = 0, _lastRefresh = 0, _lastStatus = 0;
+    uint32_t _lastConfigCheck = 0, _lastState = 0, _lastRefresh = 0, _lastStatus = 0;
     size_t   _discoveryIndex  = 0;
     bool     _retiredDone     = false;
 
@@ -171,7 +177,13 @@ private:
     std::map<std::string, std::string> _seen;  // state suffix -> last setting value seen
     std::string                        _lastOnEffect;
 
-    // ---- client lifecycle -----------------------------------------------
+    struct Locked {
+        SemaphoreHandle_t l;
+        explicit Locked(SemaphoreHandle_t lock) : l(lock) { xSemaphoreTake(l, portMAX_DELAY); }
+        ~Locked() { xSemaphoreGive(l); }
+    };
+
+    // ---- configuration (poller) -----------------------------------------
 
     void checkConfig() {
         bool        on  = _enable->get() != 0 && _broker->get()[0] != '\0';
@@ -179,116 +191,212 @@ private:
                                    _password->get() + '\n' + _deviceId->get() + '\n' + _devName->get() + '\n' + _prefix->get() +
                                    '\n' + std::to_string(_discovery->get())
                              : std::string();
-        if (key == _cfgKey && on == _wanted) {
+        if (key == _cfgKey) {
             return;
         }
-        stopClient();
-        _cfgKey       = key;
-        _wanted       = on;
-        _lastStartTry = 0;
-        key.assign(key.size(), '\0');  // don't leave a password copy lying around
-    }
+        _cfgKey = key;
 
-    void startClient() {
-        _host      = _broker->get();
-        _userStr   = _user->get();
-        _passStr   = _password->get();
-        _id        = MqttTopics::sanitizeId(_deviceId->get());
-        _name      = _devName->get();
-        _prefixStr = _prefix->get();
-        _lwtTopic  = _id + "/availability";
+        _id          = MqttTopics::sanitizeId(_deviceId->get());
+        _name        = _devName->get();
+        _prefixStr   = _prefix->get();
         _discoveryOn = _discovery->get() != 0;
 
-        esp_mqtt_client_config_t cfg = {};
-        cfg.host                     = _host.c_str();
-        cfg.port                     = _port->get();
-        cfg.client_id                = _id.c_str();
-        if (!_userStr.empty()) {
-            cfg.username = _userStr.c_str();
-            cfg.password = _passStr.c_str();
+        std::vector<std::string> subs = MqttTopics::subscriptions(_id);
+        if (_discoveryOn) {
+            subs.push_back(_prefixStr + "/status");  // HA birth message
         }
-        cfg.lwt_topic            = _lwtTopic.c_str();
-        cfg.lwt_msg              = "offline";
-        cfg.lwt_qos              = 1;
-        cfg.lwt_retain           = 1;
-        cfg.keepalive            = 60;
-        cfg.buffer_size          = 1024;
-        cfg.out_buffer_size      = 2048;  // largest discovery doc is ~1.2 KB (MqttTopicsTest caps it)
-        cfg.task_stack           = 5120;
-        cfg.network_timeout_ms   = 5000;
-        cfg.reconnect_timeout_ms = 10000;
-
-        _client = esp_mqtt_client_init(&cfg);
-        if (!_client) {
-            log_warn("mqtt: client init failed (low memory?)");
-            return;
+        {
+            Locked g(_lock);
+            _wanted                = on;
+            _host                  = _broker->get();
+            _portNum               = _port->get();
+            _opts.clientId         = _id;
+            _opts.user             = _user->get();
+            _opts.password         = _password->get();
+            _opts.willTopic        = _id + "/availability";
+            _opts.willMessage      = "offline";
+            _opts.keepAlive        = kKeepAliveS;
+            _subs                  = std::move(subs);
+            _connected             = false;
+            ++_gen;
+            _incoming.clear();
+            _outgoing.clear();
+            _outBytes = 0;
         }
-        esp_mqtt_client_register_event(_client, MQTT_EVENT_ANY, &Mqtt::onEvent, this);
-        if (esp_mqtt_client_start(_client) != ESP_OK) {
-            log_warn("mqtt: client start failed");
-            esp_mqtt_client_destroy(_client);
-            _client = nullptr;
-            return;
-        }
-        log_info("mqtt: connecting to " << _host << ":" << _port->get() << " as " << _id);
-    }
-
-    void stopClient() {
-        if (_client) {
-            if (_connected) {
-                esp_mqtt_client_publish(_client, _lwtTopic.c_str(), "offline", 0, 1, 1);
+        if (on && !_task) {
+            // Created on first use, so a table without MQTT pays nothing.
+            if (xTaskCreatePinnedToCore(taskMain, "mqtt", 5120, this, 1, &_task, 0) != pdPASS) {
+                _task = nullptr;
+                log_warn("mqtt: could not start its task (low memory?)");
             }
-            esp_mqtt_client_stop(_client);
-            esp_mqtt_client_destroy(_client);
-            _client = nullptr;
-            log_info("mqtt: stopped");
-        }
-        _connected = false;
-        _passStr.assign(_passStr.size(), '\0');
-        _passStr.clear();
-        if (_lock) {
-            xSemaphoreTake(_lock, portMAX_DELAY);
-            _queue.clear();
-            xSemaphoreGive(_lock);
         }
     }
 
-    // ---- esp-mqtt task side ---------------------------------------------
+    // ---- socket task ------------------------------------------------------
 
-    static void onEvent(void* arg, esp_event_base_t, int32_t eventId, void* data) {
-        static_cast<Mqtt*>(arg)->handleEvent(eventId, static_cast<esp_mqtt_event_handle_t>(data));
-    }
+    static void taskMain(void* arg) { static_cast<Mqtt*>(arg)->taskLoop(); }
 
-    void handleEvent(int32_t eventId, esp_mqtt_event_handle_t e) {
-        switch (eventId) {
-            case MQTT_EVENT_CONNECTED:
-                esp_mqtt_client_publish(_client, _lwtTopic.c_str(), "online", 0, 1, 1);
-                for (auto const& t : MqttTopics::subscriptions(_id)) {
-                    esp_mqtt_client_subscribe(_client, t.c_str(), 0);
+    void taskLoop() {
+        WiFiClient       sock;
+        MqttWire::Parser parser(kMaxPayload + 160);
+        uint32_t         gen     = 0;
+        bool             up      = false;
+        uint32_t         lastTry = 0, backoff = 0, lastTx = 0, lastRx = 0;
+        std::string      host, availTopic;
+        int              port = 0;
+        MqttWire::ConnectOptions opts;
+        std::vector<std::string> subs;
+        bool                     wanted = false;
+
+        auto drop = [&](const char* why) {
+            if (up) {
+                log_info("mqtt: disconnected (" << why << ")");
+            }
+            sock.stop();
+            up         = false;
+            _connected = false;
+            parser.reset();
+        };
+        auto put = [&](const std::string& bytes) {
+            if (sock.write(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()) != bytes.size()) {
+                drop("write failed");
+                return false;
+            }
+            lastTx = millis();
+            return true;
+        };
+
+        for (;;) {
+            {
+                Locked g(_lock);
+                if (_gen != gen) {
+                    gen    = _gen;
+                    wanted = _wanted;
+                    host   = _host;
+                    port   = _portNum;
+                    opts   = _opts;
+                    subs   = _subs;
+                    availTopic = opts.willTopic;
+                    backoff    = 0;
+                    lastTry    = 0;
+                    if (up) {
+                        put(MqttWire::disconnect());
+                    }
+                    drop("settings changed");
                 }
-                if (_discoveryOn) {
-                    esp_mqtt_client_subscribe(_client, (_prefixStr + "/status").c_str(), 0);  // HA birth message
+            }
+            if (!wanted || !WiFi.isConnected()) {
+                if (up) {
+                    drop(wanted ? "WiFi down" : "disabled");
                 }
+                vTaskDelay(pdMS_TO_TICKS(500));
+                continue;
+            }
+
+            uint32_t now = millis();
+            if (!up) {
+                if (lastTry && now - lastTry < backoff) {
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    continue;
+                }
+                lastTry = now;
+                backoff = backoff ? std::min<uint32_t>(backoff * 2, 60000) : 2000;
+                if (!sock.connect(host.c_str(), port, 3000)) {
+                    log_info("mqtt: broker " << host << ":" << port << " unreachable, retry in " << backoff / 1000 << " s");
+                    continue;
+                }
+                sock.setNoDelay(true);
+                if (!put(MqttWire::connect(opts))) {
+                    continue;
+                }
+                int      code     = -1;
+                uint32_t deadline = millis() + 5000;
+                while (code < 0 && (int32_t)(deadline - millis()) > 0 && sock.connected()) {
+                    int b = sock.read();
+                    if (b < 0) {
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                        continue;
+                    }
+                    if (parser.feed(static_cast<uint8_t>(b)) && parser.type() == MqttWire::CONNACK) {
+                        code = parser.connackCode();
+                        if (code < 0) {
+                            code = 255;
+                        }
+                    }
+                }
+                if (code != 0) {
+                    log_warn("mqtt: broker refused connection: " << MqttWire::connackReason(code));
+                    sock.stop();
+                    parser.reset();
+                    continue;
+                }
+                up      = true;
+                backoff = 0;
+                lastRx  = millis();
+                uint16_t pid = 1;
+                bool     ok  = true;
+                for (auto const& t : subs) {
+                    ok = ok && put(MqttWire::subscribe(pid++, t));
+                }
+                ok = ok && put(MqttWire::publish(availTopic, "online", true));
+                if (!ok) {
+                    continue;
+                }
+                log_info("mqtt: connected to " << host << ":" << port << " as " << opts.clientId);
                 _resync    = true;
                 _connected = true;
-                break;
-            case MQTT_EVENT_DISCONNECTED:
-                _connected = false;
-                break;
-            case MQTT_EVENT_DATA:
-                // Commands are small; ignore anything split across events.
-                if (e->current_data_offset == 0 && e->data_len == e->total_data_len && e->data_len <= (int)kMaxPayload &&
-                    e->topic_len > 0 && e->topic_len <= 128) {
-                    Incoming in { std::string(e->topic, e->topic_len), std::string(e->data, e->data_len) };
-                    xSemaphoreTake(_lock, portMAX_DELAY);
-                    if (_queue.size() < kMaxQueue) {
-                        _queue.push_back(std::move(in));
-                    }
-                    xSemaphoreGive(_lock);
+            }
+
+            // Incoming.
+            int budget = 2048;
+            while (budget-- > 0 && sock.available() > 0) {
+                int b = sock.read();
+                if (b < 0) {
+                    break;
                 }
-                break;
-            default:
-                break;
+                if (!parser.feed(static_cast<uint8_t>(b))) {
+                    continue;
+                }
+                lastRx = millis();
+                if (parser.type() == MqttWire::PUBLISH) {
+                    Incoming in;
+                    if (parser.publishParts(in.topic, in.payload) && in.payload.size() <= kMaxPayload) {
+                        Locked g(_lock);
+                        if (_incoming.size() < kMaxIncoming) {
+                            _incoming.push_back(std::move(in));
+                        }
+                    }
+                }
+            }
+            if (!sock.connected()) {
+                drop("closed by broker");
+                continue;
+            }
+
+            // Outgoing.
+            for (int n = 0; n < 8 && up; ++n) {
+                std::string pkt;
+                {
+                    Locked g(_lock);
+                    if (_outgoing.empty()) {
+                        break;
+                    }
+                    pkt = std::move(_outgoing.front());
+                    _outgoing.pop_front();
+                    _outBytes -= pkt.size();
+                }
+                put(pkt);
+            }
+
+            // Keepalive.
+            now = millis();
+            if (up && now - lastTx > (kKeepAliveS * 1000u) / 2) {
+                put(MqttWire::pingreq());
+            }
+            if (up && now - lastRx > kKeepAliveS * 1500u) {
+                drop("broker silent");
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
     }
 
@@ -297,15 +405,13 @@ private:
     void drainCommands() {
         for (int n = 0; n < 4; ++n) {
             Incoming in;
-            xSemaphoreTake(_lock, portMAX_DELAY);
-            bool have = !_queue.empty();
-            if (have) {
-                in = std::move(_queue.front());
-                _queue.pop_front();
-            }
-            xSemaphoreGive(_lock);
-            if (!have) {
-                return;
+            {
+                Locked g(_lock);
+                if (_incoming.empty()) {
+                    return;
+                }
+                in = std::move(_incoming.front());
+                _incoming.pop_front();
             }
             if (in.topic == _prefixStr + "/status") {
                 if (MqttTopics::trim(in.payload) == "online") {
@@ -385,11 +491,20 @@ private:
         if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < kMinLargestBlock) {
             return false;
         }
-        return esp_mqtt_client_get_outbox_size(_client) < (int)kMaxOutbox;
+        Locked g(_lock);
+        return _outBytes < kMaxOutBytes / 2;
     }
 
-    void enqueue(const std::string& topic, const std::string& payload, bool retain) {
-        esp_mqtt_client_enqueue(_client, topic.c_str(), payload.data(), payload.size(), 0, retain, true);
+    // Queue one PUBLISH for the socket task; false if the queue is full.
+    bool send(const std::string& topic, const std::string& payload, bool retain) {
+        std::string pkt = MqttWire::publish(topic, payload, retain);
+        Locked      g(_lock);
+        if (!_connected || _outBytes + pkt.size() > kMaxOutBytes) {
+            return false;
+        }
+        _outBytes += pkt.size();
+        _outgoing.push_back(std::move(pkt));
+        return true;
     }
 
     // Publish a retained state under <id>/<suffix> if it changed.
@@ -398,19 +513,15 @@ private:
         if (it != _last.end() && it->second == value) {
             return;
         }
-        _last[suffix] = value;
-        enqueue(_id + "/" + suffix, value, true);
+        if (send(_id + "/" + suffix, value, true)) {
+            _last[suffix] = value;  // a full queue retries on the next tick
+        }
     }
 
     // State that comes from a setting: publish when the setting changes, so a
     // command's optimistic echo is not overwritten by the stale setting.
-    void publishSetting(const std::string& suffix, const char* settingName, std::string (*map)(const char*) = nullptr) {
-        const char* v = SandApi::setting(settingName);
-        if (!v) {
-            return;
-        }
-        std::string value = map ? map(v) : std::string(v);
-        auto        it    = _seen.find(suffix);
+    void publishFromSetting(const std::string& suffix, const std::string& value) {
+        auto it = _seen.find(suffix);
         if (it != _seen.end() && it->second == value && _last.count(suffix)) {
             return;
         }
@@ -419,12 +530,18 @@ private:
         publish(suffix, value);
     }
 
+    void publishSetting(const std::string& suffix, const char* settingName, std::string (*map)(const char*) = nullptr) {
+        if (const char* v = SandApi::setting(settingName)) {
+            publishFromSetting(suffix, map ? map(v) : std::string(v));
+        }
+    }
+
     // Returns true while there is discovery left to send.
     bool publishDiscoveryStep() {
         if (!_retiredDone) {
             // Retire the Pi's select/screen entities (empty retained config).
             for (auto const& t : MqttTopics::retiredTopics(_prefixStr, _id)) {
-                enqueue(t, std::string(), true);
+                send(t, std::string(), true);
             }
             _retiredDone = true;
             return true;
@@ -438,8 +555,9 @@ private:
         if (!MqttTopics::discoveryAt(_discoveryIndex, _prefixStr, _id, _name, withLeds, effects, d)) {
             return false;
         }
-        ++_discoveryIndex;
-        enqueue(d.topic, d.payload, true);
+        if (send(d.topic, d.payload, true)) {
+            ++_discoveryIndex;
+        }
         return true;
     }
 
@@ -492,13 +610,7 @@ private:
             publishSetting("led/speed/state", "LED/Speed");
             publishSetting("led/intensity/state", "LED/Intensity");
             const char* color = SandApi::setting("LED/Color");
-            std::string cs    = MqttTopics::colorState(on, color ? color : "000000");
-            auto        it    = _seen.find("led/color/state");
-            if (it == _seen.end() || it->second != cs || !_last.count("led/color/state")) {
-                _seen["led/color/state"] = cs;
-                _last.erase("led/color/state");
-                publish("led/color/state", cs);
-            }
+            publishFromSetting("led/color/state", MqttTopics::colorState(on, color ? color : "000000"));
         }
     }
 };
