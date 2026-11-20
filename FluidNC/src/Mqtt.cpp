@@ -37,6 +37,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
+#include <cstring>
 #include <deque>
 #include <map>
 #include <string>
@@ -78,6 +79,14 @@ namespace {
         std::string topic;
         std::string payload;
     };
+
+    // One-line link state for the settings page (/sand_settings_meta).
+    // Always a string literal: never the broker, user or password.
+    const char* volatile s_state = "off";
+}
+
+const char* mqtt_state() {
+    return s_state;
 }
 
 class Mqtt : public Module {
@@ -255,6 +264,9 @@ private:
             sock.stop();
             up         = false;
             _connected = false;
+            if (strcmp(s_state, "connected") == 0) {
+                s_state = "disconnected";
+            }
             parser.reset();
         };
         auto put = [&](const std::string& bytes) {
@@ -286,6 +298,7 @@ private:
                 }
             }
             if (!wanted || !WiFi.isConnected()) {
+                s_state = wanted ? "waiting for WiFi" : "off";
                 if (up) {
                     drop(wanted ? "WiFi down" : "disabled");
                 }
@@ -301,7 +314,11 @@ private:
                 }
                 lastTry = now;
                 backoff = backoff ? std::min<uint32_t>(backoff * 2, 60000) : 2000;
+                if (!up && s_state[0] != 'r') {
+                    s_state = "connecting";
+                }
                 if (!sock.connect(host.c_str(), port, 3000)) {
+                    s_state = "broker unreachable";
                     log_info("mqtt: broker " << host << ":" << port << " unreachable, retry in " << backoff / 1000 << " s");
                     continue;
                 }
@@ -309,11 +326,20 @@ private:
                 if (!put(MqttWire::connect(opts))) {
                     continue;
                 }
+                // A broker that refuses (bad credentials, ACL) sends its CONNACK
+                // and closes at once, so connected() can read false while the
+                // CONNACK still sits unread in the receive buffer: keep reading
+                // until the buffer is drained, or every refusal reads as "no reply".
                 int      code     = -1;
+                bool     closed   = false;
                 uint32_t deadline = millis() + 5000;
-                while (code < 0 && (int32_t)(deadline - millis()) > 0 && sock.connected()) {
-                    int b = sock.read();
+                while (code < 0 && (int32_t)(deadline - millis()) > 0) {
+                    int b = sock.available() > 0 ? sock.read() : -1;
                     if (b < 0) {
+                        if (!sock.connected() && sock.available() <= 0) {
+                            closed = true;
+                            break;
+                        }
                         vTaskDelay(pdMS_TO_TICKS(20));
                         continue;
                     }
@@ -325,7 +351,18 @@ private:
                     }
                 }
                 if (code != 0) {
-                    log_warn("mqtt: broker refused connection: " << MqttWire::connackReason(code));
+                    if (code >= 0) {
+                        s_state = code == 4 ? "refused: bad user name or password"
+                                : code == 5 ? "refused: not authorized"
+                                            : "refused by broker";
+                        log_warn("mqtt: broker refused connection: " << MqttWire::connackReason(code));
+                    } else if (closed) {
+                        s_state = "broker closed the connection";
+                        log_warn("mqtt: broker closed the connection without answering");
+                    } else {
+                        s_state = "broker did not answer";
+                        log_warn("mqtt: broker did not answer within 5 s");
+                    }
                     sock.stop();
                     parser.reset();
                     continue;
@@ -345,6 +382,7 @@ private:
                 log_info("mqtt: connected to " << host << ":" << port << " as " << opts.clientId);
                 _resync    = true;
                 _connected = true;
+                s_state    = "connected";
             }
 
             // Incoming.

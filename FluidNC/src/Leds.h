@@ -120,6 +120,8 @@ public:
     // Every selectable effect name in id order (no "none"), for MQTT's
     // effect select.
     static void effectNames(std::vector<std::string>& out);
+    // Every palette name in id order, for the settings page's looks editor.
+    static void paletteNames(std::vector<std::string>& out);
     Error        setLive(const std::string& key, const std::string& value);
 
     // What the strip is ACTUALLY showing, and why that differs from

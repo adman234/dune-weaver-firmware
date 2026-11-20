@@ -127,6 +127,8 @@ namespace WebUI {
         static void handleSandFeed();
         static void handleSandLed();
         static void handleWifiPage();
+        static void handleSettingsPage();
+        static void handleSettingsMeta();
         static void handleWifiStatus();
         static void handleWifiScan();
         static void handleWifiSave();
