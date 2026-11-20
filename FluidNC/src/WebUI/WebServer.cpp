@@ -1947,6 +1947,9 @@ namespace WebUI {
                 } else if (upload.status == UPLOAD_FILE_ABORTED) {
                     log_info("Update failed");
                     _upload_status = UploadStatus::FAILED;
+                    // DW fork: release the in-progress update, or every later
+                    // Update.begin() fails ("Update cancelled") until a reboot.
+                    Update.abort();
                     return;
                 }
             }

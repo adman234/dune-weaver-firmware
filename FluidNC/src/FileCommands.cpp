@@ -12,6 +12,10 @@
 #include "src/string_util.h"  // split_prefix()
 
 #include "src/HashFS.h"
+#include "src/ConfigFlip.h"
+#include "src/SettingsDefinitions.h"  // config_filename
+
+#include <memory>
 
 #include <charconv>
 
@@ -680,6 +684,107 @@ static Error xmodem_send(const char* value, AuthenticationLevel auth_level, Chan
     return size < 0 ? Error::DownloadFailed : Error::Ok;
 }
 
+// DW fork: $Config/FlipAxis[=<axes>] reverses axes/<a>/motor0 direction_pin (toggles
+// ":low") in config.yaml on the board, streaming it line by line. With no axes it only
+// reports, e.g. "x=low y=normal". The settings page used to round-trip the whole file
+// through the browser, which dipped a busy board under its low-memory floor (503).
+// The old file is kept as config-backup.yaml. Takes effect on the next boot ($Bye).
+static Error flipAxis(const char* parameter, AuthenticationLevel auth_level, Channel& out) {
+    std::string axes = parameter ? parameter : "";
+    for (char c : axes) {
+        if (!ConfigFlip::validAxis(c)) {
+            log_error_to(out, "Axes must be letters from xyzabc, e.g. $Config/FlipAxis=xy");
+            return Error::InvalidValue;
+        }
+    }
+    if (!axes.empty() && notIdleOrAlarm()) {
+        return Error::IdleError;
+    }
+    const std::string cfg = config_filename->get();
+    const char*       tmp = "flipaxis.tmp";
+    ConfigFlip        f(axes.c_str());
+    try {
+        FileStream                  in { cfg, "r", "" };
+        std::unique_ptr<FileStream> dst;
+        if (!axes.empty()) {
+            dst = std::make_unique<FileStream>(tmp, "w", "");
+        }
+        std::string line;
+        auto        emit = [&](bool nl) {
+            f.line(line);
+            if (dst) {
+                dst->write(reinterpret_cast<const uint8_t*>(line.data()), line.size());
+                if (nl) {
+                    dst->write(uint8_t('\n'));
+                }
+            }
+            line.clear();
+        };
+        char   buf[256];
+        size_t n;
+        while ((n = in.read(buf, sizeof(buf))) > 0) {
+            for (size_t i = 0; i < n; ++i) {
+                if (buf[i] == '\n') {
+                    emit(true);
+                } else {
+                    line += buf[i];
+                }
+            }
+        }
+        if (!line.empty()) {
+            emit(false);
+        }
+        if (dst && !dst->close()) {
+            throw Error::FsFailedCreateFile;
+        }
+    } catch (const Error err) {
+        log_error_to(out, "Cannot read " << cfg << " or write " << tmp);
+        std::error_code ec;
+        stdfs::remove(FluidPath { tmp, localfsName, ec }, ec);
+        return Error::FsFailedCreateFile;
+    } catch (const std::exception& ex) {
+        log_error_to(out, ex.what());
+        std::error_code ec;
+        stdfs::remove(FluidPath { tmp, localfsName, ec }, ec);
+        return Error::FsFailedCreateFile;
+    }
+    if (!axes.empty()) {
+        std::error_code ec;
+        FluidPath       tmpPath { tmp, localfsName, ec };
+        if (!f.ok()) {
+            stdfs::remove(tmpPath, ec);
+            for (char c : axes) {
+                if (f.found(c) != 1 || f.changed(c) != 1) {
+                    log_error_to(out, "No single flippable direction_pin under axes/" << c << "/motor0 (found " << f.found(c) << ")");
+                }
+            }
+            return Error::InvalidValue;
+        }
+        Error err = copyFile(cfg.c_str(), "config-backup.yaml", out);
+        if (err != Error::Ok) {
+            stdfs::remove(tmpPath, ec);
+            return err;
+        }
+        FluidPath cfgPath { cfg.c_str(), localfsName, ec };
+        stdfs::rename(tmpPath, cfgPath, ec);  // littlefs replaces an existing file
+        if (ec) {
+            log_error_to(out, "Cannot replace " << cfg << ": " << ec.message() << " (config-backup.yaml has the old one)");
+            stdfs::remove(tmpPath, ec);
+            return Error::FsFailedRenameFile;
+        }
+        HashFS::rename_file(tmpPath, cfgPath, true);
+        log_info("Config: flipped direction of " << axes << "; restart to apply");
+    }
+    std::string rep;
+    for (char c : std::string("xy") + axes) {
+        if (rep.find(std::string(1, c) + "=") == std::string::npos && f.found(c)) {
+            rep += std::string(rep.empty() ? "" : " ") + c + "=" + (f.low(c) ? "low" : "normal");
+        }
+    }
+    log_stream(out, rep);
+    return Error::Ok;
+}
+
 static Error restart(const char* parameter, AuthenticationLevel auth_level, Channel& out) {
     log_info("Restarting");
     protocol_send_event(&fullResetEvent);
@@ -714,5 +819,6 @@ void make_file_commands() {
     new UserCommand("XR", "Xmodem/Receive", xmodem_receive, allowConfigStates);
     new UserCommand("XS", "Xmodem/Send", xmodem_send, notIdleOrAlarm);
 
+    new WebCommand("axes", WEBCMD, WA, NULL, "Config/FlipAxis", flipAxis, anyState);
     new WebCommand("RESTART", WEBCMD, WA, NULL, "Bye", restart);
 }
