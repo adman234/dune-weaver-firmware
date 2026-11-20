@@ -89,7 +89,10 @@ static std::string uriEncodeGrblCharacters(const char* clear) {
 // corresponding to the hex number HH.  This works with any escaped
 // characters, not only those that are special to Grbl
 static char* uriDecode(const char* s) {
-    const int   dlen = 100;
+    // A decoded value can't be longer than the command line that carried it.
+    // (Was 100, which silently truncated long string settings such as
+    // $LED/IdleLooks and $LED/RunLooks, whose limit is 240.)
+    const int   dlen = LINE_BUFFER_SIZE;
     static char decoded[dlen + 1];
     char*       out = decoded;
     char        c;
