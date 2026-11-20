@@ -16,6 +16,7 @@ namespace {
     char       _buf[kCap];
     size_t     _head  = 0;  // next write index
     size_t     _count = 0;  // bytes stored, saturates at kCap
+    size_t     _total = 0;  // bytes ever pushed (absolute write position)
     std::mutex _mu;
 
     // Named ringPush, NOT push: inside RingLog::print_msg an unqualified
@@ -28,6 +29,7 @@ namespace {
         if (_count < kCap) {
             ++_count;
         }
+        ++_total;
     }
 }
 
@@ -48,21 +50,36 @@ void RingLog::print_msg(MsgLevel level, const char* msg) {
     ringPush('\n');
 }
 
-size_t RingLog::snapshot(char* out, size_t outlen) {
+size_t RingLog::logBegin() {
     std::lock_guard<std::mutex> lock(_mu);
-    size_t start = (_head + kCap - _count) % kCap;
-    size_t i     = 0;
-    // After a wrap the oldest entry is usually a partial line; skip to the
+    size_t first = _total - _count;
+    // After a wrap the oldest entry is usually a partial line; start at the
     // first boundary so the dump starts clean.
     if (_count == kCap) {
-        while (i < _count && _buf[(start + i) % kCap] != '\n') {
-            ++i;
+        for (size_t i = 0; i < _count; ++i) {
+            if (_buf[(first + i) % kCap] == '\n') {
+                return first + i + 1;
+            }
         }
-        ++i;
+    }
+    return first;
+}
+
+size_t RingLog::logEnd() {
+    std::lock_guard<std::mutex> lock(_mu);
+    return _total;
+}
+
+size_t RingLog::logRead(size_t& pos, size_t stop, char* out, size_t len) {
+    std::lock_guard<std::mutex> lock(_mu);
+    size_t first = _total - _count;
+    if ((ptrdiff_t)(pos - first) < 0) {
+        pos = first;  // overwritten while the caller was sending
     }
     size_t n = 0;
-    for (; i < _count && n < outlen; ++i) {
-        out[n++] = _buf[(start + i) % kCap];
+    while (n < len && (ptrdiff_t)(stop - pos) > 0) {
+        out[n++] = _buf[pos % kCap];
+        ++pos;
     }
     return n;
 }

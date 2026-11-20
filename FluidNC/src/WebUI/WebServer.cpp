@@ -25,17 +25,19 @@
 #include "WebClient.h"
 #include "WifiConfig.h"      // wifi_ap_is_fallback() etc. for the setup portal
 #include "WifiPortalPage.h"  // PAGE_WIFI_PORTAL
+#include "SettingsPage.h"    // PAGE_SETTINGS (/settings)
 
 #include "src/Protocol.h"  // protocol_send_event
 #include "src/SandApi.h"   // SandApi::statusJson() for /sand_status
 #include "src/Leds.h"      // Leds::instance() for /sand_led
+const char* mqtt_state();  // Mqtt.cpp: link state for /sand_settings_meta
 #include "src/Playlist.h"  // Playlist::stopActive() for /sand_stop
 #include "src/Kinematics/ThetaRho.h"  // ThetaRho::setFeedLive() for /sand_feed?mm
 #include "src/TimeKeeper.h"            // Clock:: for /sand_time
 #include "src/FluidPath.h"
 #include "src/JSONEncoder.h"
 #include "src/StartupLog.h"  // StartupLog::dump() for /sand_bootlog
-#include "src/RingLog.h"     // RingLog::dump() for /sand_log
+#include "src/RingLog.h"     // RingLog::logRead() for /sand_log
 #include "src/HttpRange.h"   // ranged /sd/ file GETs (preview-shard sync)
 #include "src/Job.h"         // Job::active() to gate OTA while a pattern runs
 #include "src/Report.h"      // git_info for the /updatefw response
@@ -235,6 +237,8 @@ namespace WebUI {
         _webserver->on("/sand_coredump", HTTP_ANY, handleSandCoredump);
         _webserver->on("/sand_playlists", HTTP_ANY, handleSandPlaylists);
         _webserver->on("/sand_settings", HTTP_ANY, handleSandSettings);
+        _webserver->on("/sand_settings_meta", HTTP_ANY, handleSettingsMeta);
+        _webserver->on("/settings", HTTP_ANY, handleSettingsPage);
         _webserver->on("/sand_time", HTTP_ANY, handleSandTime);
         _webserver->on("/sand_feed", HTTP_ANY, handleSandFeed);
         _webserver->on("/sand_led", HTTP_ANY, handleSandLed);
@@ -569,6 +573,7 @@ namespace WebUI {
                          "Patterns   GET /sand_patterns\n"
                          "Playlists  GET /sand_playlists\n"
                          "Settings   GET /sand_settings\n"
+                         "Setup page GET /settings         (MQTT, axis direction, motion test, LED looks)\n"
                          "Boot log   GET /sand_bootlog     (text; survives a panic reset)\n"
                          "Log        GET /sand_log         (text; last ~8KB of runtime log)\n"
                          "Crash      GET /sand_coredump    (JSON; last panic backtrace; ?erase=1)\n"
@@ -1035,7 +1040,59 @@ namespace WebUI {
 
     void Web_Server::handleWifiPage() {
         _webserver->sendHeader("Cache-Control", "no-store");
-        _webserver->send(200, "text/html", PAGE_WIFI_PORTAL);
+        // send_P with a length streams from flash; send(const char*) would
+        // first copy the whole page into a heap String.
+        _webserver->send_P(200, "text/html", PAGE_WIFI_PORTAL, sizeof(PAGE_WIFI_PORTAL) - 1);
+    }
+
+    // The table's own settings page, for what the phone app has no screen
+    // for (MQTT, axis direction, a motion test, LED look rotation).  Static:
+    // it reads everything through the API, so it holds no secrets itself.
+    void Web_Server::handleSettingsPage() {
+        _webserver->sendHeader("Cache-Control", "no-store");
+        // Streamed from flash (see handleWifiPage): a heap copy of this
+        // ~15 KB page cratered free memory to ~7 KB, enough to fail an OTA.
+        _webserver->send_P(200, "text/html", PAGE_SETTINGS, sizeof(PAGE_SETTINGS) - 1);
+    }
+
+    // What the settings page needs beside /sand_settings: the LED effect and
+    // palette names for its looks editor, the MQTT link state (a fixed
+    // phrase, never the broker or credentials), and whether control calls
+    // need the table password.
+    //   GET /sand_settings_meta -> {"mqtt":"connected","locked":false,
+    //                               "effects":[...],"palettes":[...]}
+    void Web_Server::handleSettingsMeta() {
+        std::vector<std::string> names;
+        std::string              out = "{\"mqtt\":\"";
+        out += mqtt_state();
+        out += "\",\"locked\":";
+        out += (sand_password && sand_password->get()[0]) ? "true" : "false";
+        // Identity for the page header. The hostname is [A-Za-z0-9-] only
+        // (HostnameSetting), so it needs no JSON escaping.
+        out += ",\"host\":\"";
+        out += WiFi.getHostname() ? WiFi.getHostname() : "";
+        out += "\",\"ip\":\"";
+        IPAddress ip = WiFi.status() == WL_CONNECTED ? WiFi.localIP() : WiFi.softAPIP();
+        out += ip.toString().c_str();
+        out += "\"";
+        auto list = [&](const char* key) {
+            out += ",\"";
+            out += key;
+            out += "\":[";
+            for (size_t i = 0; i < names.size(); ++i) {
+                out += i ? ",\"" : "\"";
+                out += names[i];
+                out += "\"";
+            }
+            out += "]";
+        };
+        Leds::effectNames(names);
+        list("effects");
+        Leds::paletteNames(names);
+        list("palettes");
+        out += "}";
+        _webserver->sendHeader("Cache-Control", "no-store");
+        _webserver->send(200, "application/json", out.c_str());
     }
 
     // OS connectivity probes (Android generate_204, iOS hotspot-detect,
@@ -1497,17 +1554,28 @@ namespace WebUI {
 
     // Rolling session log (RingLog): the last ~8 KB of runtime log lines,
     // each prefixed with uptime seconds.  This is where playlist finish
-    // reasons and SD errors end up on a headless table.  Snapshot into a
-    // static buffer (no heap - see RingLog::snapshot) and stream it out in
-    // bounded chunks.
+    // reasons and SD errors end up on a headless table.  Streamed straight
+    // out of the ring in small chunks (no heap, no full-size copy).
     void Web_Server::handleSandLog() {
-        static char snap[RingLog::kCapacity];
-        size_t      n = RingLog::snapshot(snap, sizeof(snap));
+        // Sending the ~8 KB log pins ~12 KB of lwIP + WiFi TX buffers until the
+        // phone ACKs it (measured: 14920 -> 2708 free in 37 ms, mid-pattern).
+        // The log is never urgent -- the app's background sync retries -- so
+        // refuse it unless there is room, rather than dig a crater that close
+        // to the 6 KB hard floor.
+        if (xPortGetFreeHeapSize() < 24000) {
+            _webserver->sendHeader("Cache-Control", "no-store");
+            _webserver->send(503, "text/plain", "busy: low memory, try again shortly");
+            return;
+        }
+        // 512 bytes at a time straight out of the ring (no 8 KB snapshot buffer).
+        // Lines logged while this sends are left for the next fetch.
+        char   chunk[512];
+        size_t pos = RingLog::logBegin(), stop = RingLog::logEnd(), n;
         _webserver->sendHeader("Cache-Control", "no-store");
         _webserver->setContentLength(CONTENT_LENGTH_UNKNOWN);
         _webserver->send(200, "text/plain", "");
-        for (size_t off = 0; off < n; off += 1024) {
-            _webserver->sendContent(snap + off, n - off < 1024 ? n - off : 1024);
+        while ((n = RingLog::logRead(pos, stop, chunk, sizeof(chunk))) > 0) {
+            _webserver->sendContent(chunk, n);
         }
         _webserver->sendContent("", 0);  // terminate the chunked response
     }

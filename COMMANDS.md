@@ -47,6 +47,9 @@ curl "$B/sand_playlists"     # JSON array of /playlists/*.txt
 curl "$B/sand_settings"      # JSON of all app settings (speed, LED, playlist, quiet hours)
 curl "$B/sand_bootlog"       # plain-text boot log ($SS); after a PANIC reset it still holds the
                              #   previous boot's log (RTC RAM) -> the on-device crash breadcrumb
+# Browser setup page: names/IP, MQTT, motion test, axis flip, LED looks
+#   open "$B/settings"
+curl "$B/sand_settings_meta" # {mqtt link state, locked, host, ip, effects[], palettes[]}
 curl "$B/sand_log"           # rolling session log (last ~8KB, [+uptime_s] prefixed): playlist end
                              #   reasons, SD errors, alarms. RAM-only, lost on reboot
 curl "$B/sand_coredump"      # last crash: task, PC, backtrace addrs (survives reboot; ?erase=1 clears)

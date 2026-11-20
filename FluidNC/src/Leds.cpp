@@ -170,6 +170,18 @@ namespace {
 
 Leds* Leds::_instance = nullptr;
 
+void Leds::paletteNames(std::vector<std::string>& out) {
+    std::vector<std::pair<int, std::string>> byId;
+    for (auto const& p : ledPalettes) {
+        byId.emplace_back(p.second, p.first);
+    }
+    std::sort(byId.begin(), byId.end());
+    out.clear();
+    for (auto& p : byId) {
+        out.push_back(p.second);
+    }
+}
+
 void Leds::effectNames(std::vector<std::string>& out) {
     std::vector<std::pair<int, std::string>> byId;
     for (auto const& e : ledEffects) {

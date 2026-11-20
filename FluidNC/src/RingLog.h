@@ -29,12 +29,16 @@ public:
 
     void print_msg(MsgLevel level, const char* msg) override;
 
-    // Copy the buffered lines, oldest first (starting at a line boundary),
-    // into out (>= kCapacity bytes) and return the byte count.  A caller-owned
-    // buffer instead of a std::string: an 8 KB heap spike from dumping the log
-    // mid-pattern dropped a running table to 7 KB free (the reader nearly
-    // caused the OOM it was checking for).
-    static size_t snapshot(char* out, size_t outlen);
+    // Read the buffered lines in pieces, oldest first, with no full-size
+    // copy: an 8 KB static snapshot buffer used to sit in .bss for good, and
+    // an 8 KB heap copy dropped a running table to 7 KB free. Positions are
+    // absolute byte counts since boot. logBegin() is the first whole line still
+    // held, logEnd() the current write position; logRead() copies up to len bytes
+    // from pos (skipping ahead if those bytes were overwritten meanwhile),
+    // advances pos and returns the count, 0 once pos reaches stop.
+    static size_t logBegin();
+    static size_t logEnd();
+    static size_t logRead(size_t& pos, size_t stop, char* out, size_t len);
 };
 
 extern RingLog ringLog;
