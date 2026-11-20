@@ -839,6 +839,14 @@ void protocol_do_start_home() {
 // is applied to the Y MOTOR directly (bypassing the ThetaRho coupling) -- only
 // rho drives into the stop; theta is left in place and simply zeroed.
 static void protocol_run_crash_home(float theta_offset_rad) {
+    // Only a real home since boot proves where the carriage is.  The "homed"
+    // axis bits are not enough: with start: must_home: false they are set from
+    // power-on, and the $X below sets them too, so checking them alone made
+    // the boot home drive just the margin instead of the full travel.
+    // Capture this before the $X.
+    const bool knownPos = Machine::Homing::homed_since_boot() && !state_is(State::Alarm) &&
+                          Machine::Homing::axis_is_homed(Y_AXIS);
+
     // Clear the power-on Unhomed alarm so jog motion is permitted.
     if (state_is(State::Alarm)) {
         char unlock[] = "$X";
@@ -860,9 +868,9 @@ static void protocol_run_crash_home(float theta_offset_rad) {
     // ~200 mm drive at the gentle crash feed: about a minute of grinding
     // against the stop, which reads as homing that never finishes (upstream
     // issue #1).  At boot the position is unknown, so the full travel is the
-    // only safe distance; on a re-home with Y still homed (a reset or alarm
-    // clears that), drive just the current rho plus a margin.
-    if (Machine::Homing::axis_is_homed(Y_AXIS)) {
+    // only safe distance; on a re-home after a home this boot, with no alarm
+    // since, drive just the current rho plus a margin.
+    if (knownPos) {
         float need = fabsf(get_mpos()[Y_AXIS]) + CRASH_HOME_MARGIN_RHO;
         if (need < dist) {
             dist = need;
