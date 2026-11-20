@@ -64,7 +64,13 @@ class SerialLink {
         await sleep(500);
       }
     }
+    // Release DTR/RTS explicitly. Browsers differ in what they assert on open
+    // (Firefox's Web Serial is not Chrome's), and on a DLC32 RTS low-active
+    // holds EN, i.e. keeps the ESP32 in reset with the board silent.
+    try { await this.port.setSignals({ dataTerminalReady: false, requestToSend: false }); }
+    catch (e) { /* not every driver supports it */ }
     this.closed = false;
+    this.rx = 0;
     this.loop = this.readLoop();
   }
 
@@ -76,6 +82,7 @@ class SerialLink {
           const { value, done } = await this.reader.read();
           if (done) break;
           for (const b of value) this.buf.push(b);
+          this.rx += value.length;
           this.wake();
         }
       } catch (e) {
@@ -147,13 +154,22 @@ class SerialLink {
 
 // ---------------------------------------------------------------- commands
 
-// FluidNC's realtime characters must not appear raw in a value; its parser
-// decodes these %XX forms (the same encoding `$S` uses when listing).
+// FluidNC's realtime characters must not appear raw in a value, and the serial
+// reader swallows every byte >= 0x80 as a realtime command, so non-ASCII text
+// (accents, emoji, UTF-8 in general) would silently lose characters. Its
+// parser decodes %XX back to bytes, so send all of those escaped.
 function encodeValue(v) {
   v = String(v);
   if (/[\r\n]/.test(v)) throw new Error("values cannot contain line breaks");
-  return v.replace(/%/g, "%25").replace(/!/g, "%21").replace(/\?/g, "%3F").replace(/~/g, "%7E");
+  let out = "";
+  for (const b of new TextEncoder().encode(v)) {
+    const raw = b >= 0x20 && b <= 0x7e && b !== 0x25 && b !== 0x21 && b !== 0x3f && b !== 0x7e;
+    out += raw ? String.fromCharCode(b) : "%" + b.toString(16).toUpperCase().padStart(2, "0");
+  }
+  return out;
 }
+
+const utf8Len = (s) => new TextEncoder().encode(s).length;
 
 function decodeValue(v) {
   return v.replace(/%(25|21|3F|7E)/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
@@ -171,8 +187,14 @@ async function command(link, line, timeoutMs = 8000, quiet = false) {
     const t = l.trim();
     if (t === "ok") return { ok: true, lines: out };
     if (/^error:/.test(t)) {
-      if (!quiet) log("  " + t, "err");
-      return { ok: false, error: t, lines: out };
+      // FluidNC names the error code on the line after it; keep that with this
+      // command instead of letting it show up under the next one.
+      const next = await link.readLine(300);
+      const named = next && /^\[MSG:ERR: (.*)\]$/.exec(next.trim());
+      if (next !== null && !named) link.buf.unshift(...new TextEncoder().encode(next + "\n"));
+      const error = t + (named ? " " + named[1] : "");
+      if (!quiet) log("  " + error, "err");
+      return { ok: false, error, lines: out };
     }
     if (t.startsWith("<")) continue; // a status report answering an earlier '?'
     if (t.startsWith("[MSG:")) { if (!quiet) log("  " + t, "msg"); continue; }
@@ -183,9 +205,22 @@ async function command(link, line, timeoutMs = 8000, quiet = false) {
 // Wait until the board answers and is Idle or Alarm (settings are idle-gated;
 // a real config homes on boot first).
 async function waitReady(link, timeoutMs) {
-  const end = Date.now() + timeoutMs;
-  let lastState = "";
+  const start = Date.now(), end = start + timeoutMs, rx0 = link.rx;
+  let lastState = "", kicked = false, since = start;
   while (Date.now() < end) {
+    if (link.rx === rx0 && Date.now() - since > 8000) {
+      if (kicked) {
+        throw new Error("the board sends nothing back. Check that the boot jumper / SDA–GND short " +
+          "is removed, press RESET on the board, and close any other program using the port. " +
+          (/firefox/i.test(navigator.userAgent)
+            ? "This works in Chrome and Edge but has been seen to hang in Firefox; try one of those."
+            : ""));
+      }
+      kicked = true;
+      log("The board is silent; pulsing reset once.", "warn");
+      await link.resetBoard();
+      since = Date.now();
+    }
     await link.write("?");
     const until = Date.now() + 1000;
     while (Date.now() < until) {
@@ -225,6 +260,7 @@ function buildConfig(text, opts) {
   if (opts.hostname) edit(/^(hostname: ).*$/m, opts.hostname, "hostname:");
   if (opts.ySteps) edit(/(\r?\n  y:[ \t]*\r?\n    steps_per_mm: )[0-9.]+/, opts.ySteps, "y steps_per_mm");
   if (opts.leds) edit(/(\r?\n  num_leds: )[0-9]+/, opts.leds, "leds num_leds");
+  if (opts.plainClears) text = text.replace(/(\/patterns\/clear_\w+?)_pro\.thr/g, "$1.thr");
   return text.split(/\r?\n/).join(nl);
 }
 
@@ -326,6 +362,29 @@ async function fetchImage(img) {
   return bytes;
 }
 
+const CONNECT_HELP =
+  "The chip did not enter download mode, so nothing was written. " +
+  "To only change WiFi, MQTT or the table name, tick \"Don't flash\" and run again — no jumper needed. " +
+  "To flash: on an MKS DLC32 v2.2 short SDA to GND (on a board with a BOOT button, hold it), " +
+  "press RESET, then press the button here again; remove the short once it is done. " +
+  "Also check no other tab or program has the port open.";
+
+// Plain-language help for settings the board refuses.
+const SETTING_HELP = {
+  "Sta/Password": "the WiFi password must be 8 to 63 characters. Retype it and run again with \"Don't flash\" ticked.",
+  "Sta/SSID": "the WiFi network name must be 1 to 32 bytes.",
+  "MQTT/Password": "retype the MQTT password and run again with \"Don't flash\" ticked.",
+  "Hostname": "use 1 to 32 letters, digits or dashes.",
+};
+
+function explainError(msg) {
+  if (/Failed to open serial port|port is already open|NetworkError/i.test(msg)) {
+    return msg + " — another tab or program (another flasher tab, a serial monitor, Cura, LightBurn…) " +
+      "has the port open. Close it, unplug and replug the USB cable, and try again.";
+  }
+  return msg;
+}
+
 async function flash(port, target, fresh) {
   const names = fresh ? ["bootloader", "partitions", "bootapp", "firmware", "filesystem"]
                       : ["bootapp", "firmware"];
@@ -346,8 +405,14 @@ async function flash(port, target, fresh) {
     transport, baudrate: parseInt($("baud").value, 10), terminal, romBaudrate: 115200,
   });
   try {
-    setStatus("Connecting to the chip (hold BOOT if it does not answer)…");
-    await loader.main();
+    setStatus("Connecting to the chip… (no answer? see the boot-mode note above)");
+    try {
+      await loader.main();
+    } catch (e) {
+      const m = e && e.message ? e.message : String(e);
+      if (/open/i.test(m)) throw e; // the port itself is busy; explainError covers it
+      throw new Error(CONNECT_HELP + " (esptool: " + m + ")");
+    }
     const chip = loader.chip.CHIP_NAME;
     if (chip !== target.chip) {
       throw new Error("this board is an " + chip + ", not the " + target.chip +
@@ -379,12 +444,25 @@ function formSettings() {
   const s = [];
   const val = (id) => $(id).value.trim();
   if (val("hostname")) s.push(["Hostname", val("hostname")]);
+  // Check what the board would refuse before touching it: a refused setting
+  // only shows up as "error:2" halfway through the run.
   if (val("ssid")) {
+    const pw = $("wifipass").value, n = utf8Len(pw);
+    if (utf8Len(val("ssid")) > 32) throw new Error("The WiFi network name is too long (32 bytes at most).");
+    if (!pw) throw new Error("Type the WiFi password. (The box is emptied after every successful run.) " +
+                             "Networks without a password can't be set up here.");
+    if (n < 8 || n > 64) throw new Error("The WiFi password must be 8 to 63 characters; the board refuses anything else.");
     s.push(["Sta/SSID", val("ssid")]);
-    s.push(["Sta/Password", $("wifipass").value]);
+    s.push(["Sta/Password", pw]);
+  } else if ($("wifipass").value) {
+    throw new Error("A WiFi password was typed but no network name. Fill in the WiFi network too.");
   }
   if ($("mqtt").checked) {
-    if (!val("broker")) throw new Error("MQTT needs a broker address");
+    if (!val("broker")) throw new Error("MQTT needs a broker address.");
+    if (val("mqttuser") && !$("mqttpass").value) {
+      throw new Error("Type the MQTT password (the box is emptied after every successful run), " +
+                      "or clear the MQTT user if your broker has no login.");
+    }
     s.push(["MQTT/Broker", val("broker")]);
     s.push(["MQTT/Port", val("mqttport") || "1883"]);
     s.push(["MQTT/User", val("mqttuser")]);
@@ -404,6 +482,20 @@ async function setupBoard(port, plan) {
     await sleep(1500);
     await link.write("\n");
     await waitReady(link, 60000);
+
+    if (!plan.config) {
+      // "Keep current" on a board coming from the Raspberry Pi setup keeps the
+      // Pi-era config: Cartesian, a UART to the Pi, no playlists, LEDs or
+      // boot homing. The firmware runs but the table does nothing useful.
+      const cur = await command(link, "$LocalFS/Show=config.yaml", 15000, true);
+      if (cur.ok && !isSandConfig(cur.lines.join("
+"))) {
+        log("This board still has its old Raspberry Pi config (no ThetaRho, playlists or LEDs). " +
+            "Pick your table under \"Table\" and run again with \"Don't flash\" ticked to give it a sand-table config.",
+            "warn");
+        plan.staleConfig = true;
+      }
+    }
 
     if (plan.config) {
       setStatus("Uploading config.yaml…");
@@ -454,6 +546,15 @@ async function setupBoard(port, plan) {
     await link.close();
   }
   return results;
+}
+
+// A config this firmware can drive as a sand table: polar or rectangular
+// sand kinematics plus the playlist section. The stock Pi-era config has
+// neither (Cartesian, uart1 to the Pi).
+function isSandConfig(text) {
+  return /^kinematics:[ 	]*
+?
+[ 	]+(ThetaRho|CoreXY):/m.test(text) && /^playlist:/m.test(text);
 }
 
 // ---------------------------------------------------------------- UI
@@ -507,18 +608,25 @@ async function run() {
       log("Restore file: " + Object.keys(backup.settings).length + " settings" +
           (backup.config ? " + config.yaml" : ""), "msg");
     }
-    if (backup && backup.config && $("useBackupConfig").checked) {
+    if (backup && backup.config && $("useBackupConfig").checked && !isSandConfig(backup.config)) {
+      log("The backup's config.yaml is a Raspberry Pi-era config (not a sand-table config); " +
+          (p ? "using the " + p.label + " profile instead." : "it is not restored. Pick your table to give it one."),
+          "warn");
+    }
+    if (backup && backup.config && $("useBackupConfig").checked && isSandConfig(backup.config)) {
       plan.config = backup.config;
     } else if (p) {
       const text = await (await fetch("fw/" + p.config, { cache: "no-cache" })).text();
       plan.config = buildConfig(text, {
         name: p.name, hostname: $("hostname").value.trim() || p.hostname,
         ySteps: $("ySteps").value.trim(), leds: $("leds").value.trim(),
+        plainClears: !!p.plainClears,
       });
     }
     plan.configFilename = !!plan.config;
   } catch (e) {
     log("Error: " + e.message, "err");
+    setStatus("Nothing was sent to the board — " + e.message);
     return;
   }
 
@@ -528,32 +636,51 @@ async function run() {
   setBusy(true);
   $("log").innerHTML = "";
   setProgress(0);
-  let port;
+  let port, failedKeys = [];
   try {
     port = await navigator.serial.requestPort();
-    if (!$("skipFlash").checked) await flash(port, target, fresh);
+    if (!$("skipFlash").checked) {
+      await flash(port, target, fresh);
+      setStatus("Firmware written. Remove the boot jumper / SDA–GND short if you used one.");
+      alert("Firmware written.\n\nIf you shorted SDA to GND (MKS DLC32 v2.2) or fitted a boot " +
+            "jumper to flash, remove it now, then press OK so the board can start normally.");
+    }
     const needSetup = plan.config || plan.settings.length || (plan.restore && Object.keys(plan.restore).length);
     if (needSetup) {
-      const results = await setupBoard(port, { ...plan, reset: !$("skipFlash").checked });
+      const sp = { ...plan, reset: !$("skipFlash").checked };
+      const results = await setupBoard(port, sp);
+      plan.staleConfig = sp.staleConfig;
       const failed = results.filter((r) => !r.ok);
+      failedKeys = failed.map((r) => r.key);
       log("Settings: " + (results.length - failed.length) + " saved" +
           (failed.length ? ", " + failed.length + " failed: " +
            failed.map((r) => r.key + " (" + r.error + ")").join(", ") : ""), failed.length ? "warn" : "ok");
+      for (const r of failed) if (SETTING_HELP[r.key]) log("  " + r.key + ": " + SETTING_HELP[r.key], "warn");
     } else if (!$("skipFlash").checked) {
       const link = new SerialLink(port);
       await link.open();
       await link.resetBoard();
       await link.close();
     }
-    setStatus("Done. The table restarts and joins your WiFi in about 30 seconds.");
+    setStatus(failedKeys.length
+      ? "Finished, but some settings were refused — see the log, fix them, and run again with \"Don't flash\" ticked."
+      : plan.staleConfig
+      ? "Firmware done, but the board still has its old Raspberry Pi config — pick your table and run again with \"Don't flash\" ticked."
+      : "Done. The table restarts and joins your WiFi in about 30 seconds.");
     log("Done.", "ok");
+    // Clear secrets from the page once they have been used. Only on success:
+    // after a failure they are kept, so a retry doesn't silently send blanks.
+    if (!failedKeys.some((k) => /Password$/.test(k))) {
+      $("wifipass").value = "";
+      $("mqttpass").value = "";
+    }
   } catch (e) {
     if (e && e.name === "NotFoundError") setStatus("No port selected.");
-    else { log("Error: " + (e && e.message ? e.message : e), "err"); setStatus("Failed — see the log."); }
+    else {
+      log("Error: " + explainError(e && e.message ? e.message : String(e)), "err");
+      setStatus("Failed — see the log. Your entries (passwords included) are kept for the retry.");
+    }
   } finally {
-    // Clear secrets from the page once they have been used.
-    $("wifipass").value = "";
-    $("mqttpass").value = "";
     setBusy(false);
   }
 }
@@ -574,11 +701,18 @@ async function init() {
   const board = $("board");
   for (const [mcu, t] of Object.entries(manifest.targets)) board.add(new Option(t.label, mcu));
   board.onchange = fillProfiles;
-  $("install").onchange = () => {
-    const fresh = $("install").value === "fresh";
-    $("freshNote").hidden = !fresh;
-    fillProfiles();
+  const onMode = () => {
+    const skip = $("skipFlash").checked;
+    // "Don't flash" with a fresh install means nothing; it is always an update.
+    if (skip && $("install").value === "fresh") { $("install").value = "update"; fillProfiles(); }
+    $("install").disabled = skip;
+    $("freshNote").hidden = skip || $("install").value !== "fresh";
+    $("skipNote").hidden = !skip;
+    $("bootNote").hidden = skip;
+    $("go").textContent = skip ? "Connect and apply setup" : "Connect and install";
   };
+  $("install").onchange = () => { fillProfiles(); onMode(); };
+  $("skipFlash").onchange = onMode;
   $("profile").onchange = onProfile;
   $("hostname").oninput = () => { $("hostname").dataset.auto = "0"; };
   $("mqtt").onchange = () => { $("mqttFields").hidden = !$("mqtt").checked; };
@@ -605,6 +739,8 @@ async function init() {
     } finally { setBusy(false); }
   };
   fillProfiles();
+  onMode();
+  if (/firefox/i.test(navigator.userAgent)) $("firefoxNote").hidden = false;
 }
 
 init().catch((e) => log("Could not load the firmware list: " + e.message, "err"));

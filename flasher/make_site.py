@@ -55,14 +55,15 @@ TARGETS = {
 
 # Table profiles: a config.yaml from the repo plus the few values that differ.
 # The original Dune Weaver is the Pro mechanism with a smaller rho gear and
-# fewer LEDs (same DLC32, same theta gearing).
+# fewer LEDs (same DLC32, same theta gearing), and it uses the plain clear
+# patterns (clear_from_in.thr), not the _pro ones.
 PROFILES = [
     {"id": "pro", "label": "Dune Weaver Pro", "mcu": "esp32",
      "config": "configs/dune_weaver_pro/config.yaml"},
     {"id": "old", "label": "Dune Weaver (original)", "mcu": "esp32",
      "config": "configs/dune_weaver_pro/config.yaml",
      "ySteps": 287, "leds": 75, "hostname": "DWOld",
-     "name": "Dune Weaver ThetaRho"},
+     "name": "Dune Weaver ThetaRho", "plainClears": True},
     {"id": "mini_pro", "label": "Dune Weaver Mini Pro", "mcu": "esp32",
      "config": "configs/dune_weaver_mini_pro/config.yaml"},
     {"id": "gold", "label": "Dune Weaver Gold", "mcu": "esp32",

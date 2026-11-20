@@ -62,6 +62,10 @@
   </section>
 
   <div id="app">
+    <section id="firefoxNote" class="hint warn" hidden>
+      Firefox lists the board as "USB Serial" rather than a COM port; pick that one. If the page
+      sits on "Waiting for the board to boot…", press RESET on the board, or use Chrome or Edge.
+    </section>
     <section>
       <h2>1. Board and install</h2>
       <label for="board">Board</label>
@@ -75,6 +79,20 @@
         Download a backup first (bottom of this page) if the board already runs Dune Weaver.
         Patterns on the SD card are not touched.</p>
       <label class="inline"><input type="checkbox" id="skipFlash"> Don't flash; only apply the setup below</label>
+      <p id="skipNote" class="hint" hidden>Setup only: changes the WiFi, MQTT, table name or config on a board
+        that already runs Dune Weaver. No jumper or BOOT button needed. Leave "Table config" on
+        "No table config" to keep the current one, and fill in only what you want to change.
+        Passwords must be typed every time.</p>
+      <div id="bootNote" class="hint">
+        <p class="hint"><b>Getting the board into download mode.</b> Most boards switch on their own.
+          If flashing stops with "Failed to connect":</p>
+        <ul class="hint">
+          <li><b>MKS DLC32 v2.2</b> (no BOOT button): short the <b>SDA</b> pin to <b>GND</b> with a jumper wire, press <b>RESET</b>, then press Connect again.
+            <b>Remove the short when flashing is done</b>, or the board won't start.</li>
+          <li>Boards with a <b>BOOT</b> button: hold BOOT, tap RESET, release BOOT, then press Connect.</li>
+          <li>Only changing WiFi or MQTT? Tick "Don't flash" above instead; no jumper needed.</li>
+        </ul>
+      </div>
     </section>
 
     <section>
@@ -108,7 +126,8 @@
           <div><label for="mqttpass">Password</label><input type="password" id="mqttpass" autocomplete="new-password"></div>
         </div>
       </div>
-      <p class="hint">These go to the board over USB only. This page doesn't save or send them anywhere else, and clears the password fields when it finishes.</p>
+      <p class="hint">WiFi: 2.4 GHz networks only (the ESP32 has no 5 GHz radio), password 8–63 characters.</p>
+      <p class="hint">These go to the board over USB only. This page doesn't save or send them anywhere else, and clears the password fields after a successful run (they stay filled in after a failure so you can retry).</p>
     </section>
 
     <section>
