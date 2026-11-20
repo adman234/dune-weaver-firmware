@@ -100,9 +100,10 @@ a{color:#c98f3d}
 
 <section>
 <h2>Axis direction</h2>
-<div class="dim">Flipping edits config.yaml (a backup is saved as /config-backup.yaml) and restarts the table, which then homes. Only flip an axis that moves the wrong way.</div>
+<div class="dim">Flipping edits config.yaml on the table (the old one is kept as /config-backup.yaml) and restarts it, which then homes. Stop any pattern first. Only flip an axis that moves the wrong way.</div>
 <div class="axis"><span>Theta (rotation): <b id="ax_x">&hellip;</b></span><button class="warn" onclick="flip('x',this)">Flip</button></div>
 <div class="axis"><span>Rho (in / out): <b id="ax_y">&hellip;</b></span><button class="warn" onclick="flip('y',this)">Flip</button></div>
+<div class="axis"><span>Both axes</span><button class="warn" onclick="flip('xy',this)">Flip both</button></div>
 <div class="msg" id="a_msg"></div>
 </section>
 
@@ -218,42 +219,23 @@ async function poll(){
     if(typeof ST.theta=='number'){$('th').textContent=ST.theta.toFixed(2);$('rh').textContent=ST.rho.toFixed(2)}
   }catch(e){$('state').textContent='offline'}
 }
-var CFG='';
-function axisLine(lines,ax){
-  var inAx=false,inM=false;
-  for(var i=0;i<lines.length;i++){var l=lines[i];
-    if(/^  \S/.test(l)){inAx=(l.trim()==ax+':');inM=false;continue}
-    if(/^\S/.test(l)){inAx=false;continue}
-    if(inAx&&/^    motor0:/.test(l)){inM=true;continue}
-    if(inAx&&/^    \S/.test(l)){inM=false;continue}
-    if(inAx&&inM&&/^\s+direction_pin:/.test(l))return i;
-  }
-  return -1;
+// Axis direction lives in config.yaml; $Config/FlipAxis edits it on the board (no
+// file round-trip through the browser, which ran a busy table out of memory).
+function showAxes(t){
+  ['x','y'].forEach(function(a){var m=t.match(new RegExp('\\b'+a+'=(low|normal)'));
+    $('ax_'+a).textContent=m?(m[1]=='low'?'reversed (:low)':'normal'):'not found'});
 }
-function isLow(l){return /:low\b/i.test(l.split(':').slice(1).join(':'))}
 async function loadAxes(){
-  try{CFG=await api('/config.yaml');var L=CFG.split('\n');
-    ['x','y'].forEach(function(a){var i=axisLine(L,a);$('ax_'+a).textContent=i<0?'not found':(isLow(L[i])?'reversed (:low)':'normal')});
-  }catch(e){say('a_msg','Could not read config.yaml: '+e.message)}
-}
-async function upload(path,text){
-  var fd=new FormData(),blob=new Blob([text],{type:'application/octet-stream'});
-  fd.append('path','/');fd.append(path+'S',String(blob.size));fd.append('myfile[]',blob,path);
-  await api('/files',{method:'POST',body:fd});
+  try{showAxes(await cmd('$Config/FlipAxis'))}catch(e){say('a_msg','Could not read the axis directions: '+e.message)}
 }
 async function flip(ax,b){
-  var name=ax=='x'?'Theta':'Rho';
+  var name=ax=='x'?'Theta':ax=='y'?'Rho':'Theta and Rho';
   if(!confirm('Flip '+name+' and restart the table? It will home again after the restart.'))return;
   b.disabled=true;
   try{
-    CFG=await api('/config.yaml');var L=CFG.split('\n'),i=axisLine(L,ax);
-    if(i<0)throw new Error('no direction_pin under axes/'+ax+'/motor0');
-    var m=L[i].match(/^(\s+direction_pin:\s*)(\S+)(.*)$/);if(!m)throw new Error('unexpected line: '+L[i]);
-    var pin=m[2];pin=isLow(L[i])?pin.replace(/:low\b/i,''):pin+':low';
-    L[i]=m[1]+pin+m[3];
-    say('a_msg','Saving backup…',true);await upload('/config-backup.yaml',CFG);
-    say('a_msg','Saving config.yaml…',true);await upload('/config.yaml',L.join('\n'));
-    var chk=await api('/config.yaml');if(chk.split('\n')[i]!==L[i])throw new Error('config.yaml did not read back as written');
+    if(ST.state&&ST.state!='Idle'&&ST.state!='Alarm')throw new Error('the table is '+ST.state+'; stop it first');
+    say('a_msg','Saving config.yaml…',true);
+    showAxes(await cmd('$Config/FlipAxis='+ax));
     say('a_msg','Saved. Restarting…',true);
     try{await cmd('$Bye')}catch(e){}
     setTimeout(function(){say('a_msg','Restarted. The table is homing; test it above.',true);load()},20000);

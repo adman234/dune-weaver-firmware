@@ -532,6 +532,10 @@ curl -F "firmware.binS=$(wc -c < .pio/build/sandtable/firmware.bin)" \
 curl "$B/command?plain=\$Bye"             # reboot (board needs ~25-30s to rejoin WiFi)
 curl "$B/command?plain=\$/macros/startup_line0"   # read a config value at runtime
 #   NOTE: $/path=value runtime changes are NOT persisted; edit config.yaml to persist.
+curl "$B/command?plain=\$Config/FlipAxis"      # report axis directions: "x=low y=normal"
+curl "$B/command?plain=\$Config/FlipAxis=xy"   # toggle :low on axes/<x|y>/motor0 direction_pin
+#   in config.yaml (x, y or xy; Idle/Alarm only), old file kept as /config-backup.yaml.
+#   Streamed line by line on the board; takes effect after $Bye (the table re-homes).
 ```
 
 ---
